@@ -1,7 +1,17 @@
 use chrono::{Datelike, NaiveDate};
+use thiserror::Error;
 
 use crate::manifests::{parse_manifest, DatasetPartition};
 use crate::object_store::{ObjectStore, YearMonth};
+
+/// Errors that can occur during partition discovery.
+#[derive(Debug, Error)]
+pub enum DiscoveryError {
+    #[error("Object store error: {0}")]
+    ObjectStore(#[from] crate::object_store::ObjectStoreError),
+    #[error("Manifest parse error: {0}")]
+    Manifest(#[from] crate::manifests::ManifestError),
+}
 
 /// Return the billing-period months that overlap the range `[start, end_exclusive)`.
 ///
@@ -47,7 +57,7 @@ pub fn discover_partitions(
     base_uri: &str,
     start: NaiveDate,
     end_exclusive: NaiveDate,
-) -> anyhow::Result<Vec<DatasetPartition>> {
+) -> Result<Vec<DatasetPartition>, DiscoveryError> {
     let periods = partitions_for_range(start, end_exclusive);
     let mut partitions = Vec::new();
 

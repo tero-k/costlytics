@@ -1,7 +1,17 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use thiserror::Error;
 
 pub use crate::object_store::YearMonth;
+
+/// Errors that can occur when parsing a manifest file.
+#[derive(Debug, Error)]
+pub enum ManifestError {
+    #[error("Failed to parse manifest JSON: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("IO error reading manifest: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 /// Represents one AWS Data Export execution's manifest.
 #[derive(Debug, Clone)]
@@ -51,7 +61,7 @@ pub fn parse_manifest(
     manifest_uri: &str,
     content: &[u8],
     base_uri: &str,
-) -> anyhow::Result<DatasetPartition> {
+) -> Result<DatasetPartition, ManifestError> {
     let manifest: ManifestJson = serde_json::from_slice(content)?;
 
     // Collect all file paths from either `dataFiles` or `files[].key/dataFile`

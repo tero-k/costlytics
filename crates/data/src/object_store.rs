@@ -20,12 +20,16 @@ impl YearMonth {
         Self { year, month }
     }
 
-    /// Parse from "YYYY-MM" string.
+    /// Parse from "YYYY-MM" string. Returns `None` if month is not in 1..=12.
     pub fn parse(s: &str) -> Option<Self> {
         let (y, m) = s.split_once('-')?;
+        let month: u32 = m.parse().ok()?;
+        if !(1..=12).contains(&month) {
+            return None;
+        }
         Some(Self {
             year: y.parse().ok()?,
-            month: m.parse().ok()?,
+            month,
         })
     }
 
@@ -60,17 +64,17 @@ impl std::fmt::Display for YearMonth {
 pub trait ObjectStore: Send + Sync {
     /// List all "directory" prefixes immediately under `prefix` that match
     /// the `BILLING_PERIOD=YYYY-MM` pattern. Returns just the `YYYY-MM` part.
-    fn list_billing_periods(&self, base_uri: &str) -> anyhow::Result<Vec<String>>;
+    fn list_billing_periods(&self, base_uri: &str) -> Result<Vec<String>, ObjectStoreError>;
 
     /// Read the bytes of a file (e.g. Manifest.json).
-    fn read_file(&self, uri: &str) -> anyhow::Result<Vec<u8>>;
+    fn read_file(&self, uri: &str) -> Result<Vec<u8>, ObjectStoreError>;
 }
 
 /// Local filesystem implementation of `ObjectStore`.
 pub struct LocalObjectStore;
 
 impl ObjectStore for LocalObjectStore {
-    fn list_billing_periods(&self, base_path: &str) -> anyhow::Result<Vec<String>> {
+    fn list_billing_periods(&self, base_path: &str) -> Result<Vec<String>, ObjectStoreError> {
         let dir = std::path::Path::new(base_path);
         if !dir.exists() {
             return Ok(Vec::new());
@@ -97,7 +101,7 @@ impl ObjectStore for LocalObjectStore {
         Ok(periods)
     }
 
-    fn read_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+    fn read_file(&self, path: &str) -> Result<Vec<u8>, ObjectStoreError> {
         Ok(std::fs::read(path)?)
     }
 }
@@ -172,8 +176,8 @@ mod tests {
 
     #[test]
     fn year_month_parse_invalid() {
-        assert!(YearMonth::parse("2026-13").is_none() || YearMonth::parse("2026-13").is_some());
-        // Only check that truly malformed strings fail
+        assert!(YearMonth::parse("2026-13").is_none());
+        assert!(YearMonth::parse("2026-00").is_none());
         assert!(YearMonth::parse("not-a-date").is_none());
         assert!(YearMonth::parse("2026").is_none());
         assert!(YearMonth::parse("").is_none());
