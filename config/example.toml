@@ -1,0 +1,9 @@
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[[sources]]
+id = "local-focus12"
+name = "Local FOCUS 1.2 fixture"
+s3_uri = "fixtures/focus12"
+source_type = "focus12"

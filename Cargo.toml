@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/data",
+    "crates/api",
+]
+
+[workspace.dependencies]
+# filled in by later tasks

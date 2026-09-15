@@ -1,0 +1,9 @@
+pub mod adapters;
+pub mod config;
+pub mod discovery;
+pub mod duckdb_pool;
+pub mod fixtures;
+pub mod manifests;
+pub mod object_store;
+pub mod queries;
+pub mod schema_detection;
