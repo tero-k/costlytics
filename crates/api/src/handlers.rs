@@ -1,18 +1,22 @@
 use axum::{
     extract::{Json, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use chrono::{NaiveDate, TimeZone, Utc};
-use data::queries::summary::QueryError;
+use data::queries::summary::{CostRepository, QueryError};
 use domain::{
     cost::{BreakdownRow, CostMetric, TimeSeriesPoint},
     dimensions::Dimension,
     filters::{CostFilter, TimeGranularity},
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::state::AppState;
+
+/// Maximum allowable query date range, in days (~5 years).
+const MAX_DATE_RANGE_DAYS: i64 = 5 * 366;
 
 // ---------------------------------------------------------------------------
 // Health check
@@ -80,55 +84,98 @@ fn conflict(msg: impl Into<String>) -> impl IntoResponse {
     )
 }
 
-pub async fn cost_summary(
-    State(state): State<AppState>,
-    Json(body): Json<SummaryRequest>,
-) -> impl IntoResponse {
+/// Outcome of the preamble shared by all three `/cost/*` handlers: a resolved
+/// repository plus the `CostFilter` built from the validated request.
+struct ResolvedRequest {
+    repo: Arc<dyn CostRepository>,
+    filter: CostFilter,
+}
+
+/// Shared request preamble for the `/cost/*` handlers: validates the date
+/// range, parses the metric, resolves `source_id` against `state.repos`
+/// (defaulting to the first configured source), converts the `NaiveDate`
+/// bounds to UTC `DateTime`s, and builds the resulting `CostFilter`.
+///
+/// Request-shape-specific parsing (granularity, group_by, dimension, limit)
+/// stays in each handler — only the genuinely shared logic lives here.
+fn resolve_common(
+    state: &AppState,
+    source_id: Option<&str>,
+    start: NaiveDate,
+    end: NaiveDate,
+    metric: Option<&str>,
+) -> Result<ResolvedRequest, Box<Response>> {
     // Validate: start must be before end
-    if body.start >= body.end {
-        return bad_request("start must be before end").into_response();
+    if start >= end {
+        return Err(Box::new(bad_request("start must be before end").into_response()));
     }
 
     // Validate: date range must not exceed 5 years (~1827 days)
-    let days = (body.end - body.start).num_days();
-    if days > 5 * 366 {
-        return bad_request("date range must not exceed 5 years").into_response();
+    let days = (end - start).num_days();
+    if days > MAX_DATE_RANGE_DAYS {
+        return Err(Box::new(
+            bad_request("date range must not exceed 5 years").into_response(),
+        ));
     }
 
     // Parse metric
-    let metric = if let Some(ref m) = body.metric {
+    let metric = if let Some(m) = metric {
         match parse_metric(m) {
             Some(metric) => metric,
-            None => return bad_request(format!("unknown metric '{}'", m)).into_response(),
+            None => {
+                return Err(Box::new(
+                    bad_request(format!("unknown metric '{}'", m)).into_response(),
+                ))
+            }
         }
     } else {
         CostMetric::default()
     };
 
     // Resolve source_id: use provided or fall back to first configured source
-    let source_id = if let Some(ref id) = body.source_id {
-        id.clone()
+    let source_id = if let Some(id) = source_id {
+        id.to_string()
     } else {
         match state.config.sources.first() {
             Some(src) => src.id.clone(),
-            None => return bad_request("no sources configured").into_response(),
+            None => return Err(Box::new(bad_request("no sources configured").into_response())),
         }
     };
 
     // Look up repo
     let repo = match state.repos.get(&source_id) {
         Some(r) => r.clone(),
-        None => return bad_request(format!("unknown source_id '{}'", source_id)).into_response(),
+        None => {
+            return Err(Box::new(
+                bad_request(format!("unknown source_id '{}'", source_id)).into_response(),
+            ))
+        }
     };
 
     // Convert NaiveDate to DateTime<Utc> at midnight UTC
-    let start = Utc
-        .from_utc_datetime(&body.start.and_hms_opt(0, 0, 0).unwrap());
-    let end = Utc
-        .from_utc_datetime(&body.end.and_hms_opt(0, 0, 0).unwrap());
+    let start = Utc.from_utc_datetime(&start.and_hms_opt(0, 0, 0).unwrap());
+    let end = Utc.from_utc_datetime(&end.and_hms_opt(0, 0, 0).unwrap());
 
     let mut filter = CostFilter::date_range(start, end);
     filter.metric = metric;
+
+    Ok(ResolvedRequest { repo, filter })
+}
+
+pub async fn cost_summary(
+    State(state): State<AppState>,
+    Json(body): Json<SummaryRequest>,
+) -> impl IntoResponse {
+    let ResolvedRequest { repo, filter } = match resolve_common(
+        &state,
+        body.source_id.as_deref(),
+        body.start,
+        body.end,
+        body.metric.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(resp) => return *resp,
+    };
 
     // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
     let result = tokio::task::spawn_blocking(move || repo.summary(&filter)).await;
@@ -193,26 +240,17 @@ pub async fn cost_timeseries(
     State(state): State<AppState>,
     Json(body): Json<TimeseriesRequest>,
 ) -> impl IntoResponse {
-    // Validate: start must be before end
-    if body.start >= body.end {
-        return bad_request("start must be before end").into_response();
-    }
-
-    // Validate: date range must not exceed 5 years (~1827 days)
-    let days = (body.end - body.start).num_days();
-    if days > 5 * 366 {
-        return bad_request("date range must not exceed 5 years").into_response();
-    }
-
-    // Parse metric
-    let metric = if let Some(ref m) = body.metric {
-        match parse_metric(m) {
-            Some(metric) => metric,
-            None => return bad_request(format!("unknown metric '{}'", m)).into_response(),
-        }
-    } else {
-        CostMetric::default()
+    let ResolvedRequest { repo, mut filter } = match resolve_common(
+        &state,
+        body.source_id.as_deref(),
+        body.start,
+        body.end,
+        body.metric.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(resp) => return *resp,
     };
+    let metric = filter.metric;
 
     // Parse granularity
     let granularity = if let Some(ref g) = body.granularity {
@@ -223,6 +261,7 @@ pub async fn cost_timeseries(
     } else {
         TimeGranularity::default()
     };
+    filter.granularity = granularity;
 
     // Parse group_by (optional)
     let group_by = if let Some(ref d) = body.group_by {
@@ -234,62 +273,8 @@ pub async fn cost_timeseries(
         None
     };
 
-    // Resolve source_id: use provided or fall back to first configured source
-    let source_id = if let Some(ref id) = body.source_id {
-        id.clone()
-    } else {
-        match state.config.sources.first() {
-            Some(src) => src.id.clone(),
-            None => return bad_request("no sources configured").into_response(),
-        }
-    };
-
-    // Look up repo
-    let repo = match state.repos.get(&source_id) {
-        Some(r) => r.clone(),
-        None => return bad_request(format!("unknown source_id '{}'", source_id)).into_response(),
-    };
-
-    // Convert NaiveDate to DateTime<Utc> at midnight UTC
-    let start = Utc.from_utc_datetime(&body.start.and_hms_opt(0, 0, 0).unwrap());
-    let end = Utc.from_utc_datetime(&body.end.and_hms_opt(0, 0, 0).unwrap());
-
-    let mut filter = CostFilter::date_range(start, end);
-    filter.metric = metric;
-    filter.granularity = granularity;
-
-    // `timeseries()` guarantees the window is single-currency (or errors), but
-    // doesn't return the currency itself. Rather than plumb a new return type
-    // through `CostRepository`, fetch it via the existing `summary()` call —
-    // it's a cheap aggregate query and avoids any new SQL living in this
-    // handler layer.
-    let repo_for_summary = repo.clone();
-    let filter_for_summary = filter.clone();
-    let summary_result =
-        tokio::task::spawn_blocking(move || repo_for_summary.summary(&filter_for_summary)).await;
-
-    let currency = match summary_result {
-        Err(join_err) => {
-            tracing::error!(error = %join_err, "cost_timeseries currency lookup task panicked");
-            return internal_error("internal server error").into_response();
-        }
-        Ok(Err(QueryError::MultipleCurrencies(currencies))) => {
-            return conflict(format!(
-                "multiple currencies present: [{}]; currency filtering is not yet supported",
-                currencies.join(", ")
-            ))
-            .into_response();
-        }
-        Ok(Err(query_err)) => {
-            tracing::error!(error = %query_err, "cost_timeseries currency lookup failed");
-            return internal_error("internal server error").into_response();
-        }
-        Ok(Ok(summary)) => summary.currency,
-    };
-
     // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
-    let result =
-        tokio::task::spawn_blocking(move || repo.timeseries(&filter, group_by)).await;
+    let result = tokio::task::spawn_blocking(move || repo.timeseries(&filter, group_by)).await;
 
     match result {
         Err(join_err) => {
@@ -305,13 +290,13 @@ pub async fn cost_timeseries(
             tracing::error!(error = %query_err, "cost_timeseries query failed");
             internal_error("internal server error").into_response()
         }
-        Ok(Ok(series)) => (
+        Ok(Ok(result)) => (
             StatusCode::OK,
             Json(TimeseriesResponse {
                 metric,
-                currency,
+                currency: result.currency,
                 granularity,
-                series,
+                series: result.points,
             }),
         )
             .into_response(),
@@ -348,26 +333,17 @@ pub async fn cost_breakdown(
     State(state): State<AppState>,
     Json(body): Json<BreakdownRequest>,
 ) -> impl IntoResponse {
-    // Validate: start must be before end
-    if body.start >= body.end {
-        return bad_request("start must be before end").into_response();
-    }
-
-    // Validate: date range must not exceed 5 years (~1827 days)
-    let days = (body.end - body.start).num_days();
-    if days > 5 * 366 {
-        return bad_request("date range must not exceed 5 years").into_response();
-    }
-
-    // Parse metric
-    let metric = if let Some(ref m) = body.metric {
-        match parse_metric(m) {
-            Some(metric) => metric,
-            None => return bad_request(format!("unknown metric '{}'", m)).into_response(),
-        }
-    } else {
-        CostMetric::default()
+    let ResolvedRequest { repo, filter } = match resolve_common(
+        &state,
+        body.source_id.as_deref(),
+        body.start,
+        body.end,
+        body.metric.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(resp) => return *resp,
     };
+    let metric = filter.metric;
 
     // Parse dimension (required)
     let dimension = match body.dimension {
@@ -384,62 +360,9 @@ pub async fn cost_breakdown(
         return bad_request("limit must be greater than 0").into_response();
     }
     if limit > MAX_BREAKDOWN_LIMIT {
-        return bad_request(format!(
-            "limit must not exceed {}",
-            MAX_BREAKDOWN_LIMIT
-        ))
-        .into_response();
-    }
-
-    // Resolve source_id: use provided or fall back to first configured source
-    let source_id = if let Some(ref id) = body.source_id {
-        id.clone()
-    } else {
-        match state.config.sources.first() {
-            Some(src) => src.id.clone(),
-            None => return bad_request("no sources configured").into_response(),
-        }
-    };
-
-    // Look up repo
-    let repo = match state.repos.get(&source_id) {
-        Some(r) => r.clone(),
-        None => return bad_request(format!("unknown source_id '{}'", source_id)).into_response(),
-    };
-
-    // Convert NaiveDate to DateTime<Utc> at midnight UTC
-    let start = Utc.from_utc_datetime(&body.start.and_hms_opt(0, 0, 0).unwrap());
-    let end = Utc.from_utc_datetime(&body.end.and_hms_opt(0, 0, 0).unwrap());
-
-    let mut filter = CostFilter::date_range(start, end);
-    filter.metric = metric;
-
-    // Same rationale as `cost_timeseries`: fetch currency via the existing
-    // `summary()` call rather than plumbing a new return type through
-    // `CostRepository`.
-    let repo_for_summary = repo.clone();
-    let filter_for_summary = filter.clone();
-    let summary_result =
-        tokio::task::spawn_blocking(move || repo_for_summary.summary(&filter_for_summary)).await;
-
-    let currency = match summary_result {
-        Err(join_err) => {
-            tracing::error!(error = %join_err, "cost_breakdown currency lookup task panicked");
-            return internal_error("internal server error").into_response();
-        }
-        Ok(Err(QueryError::MultipleCurrencies(currencies))) => {
-            return conflict(format!(
-                "multiple currencies present: [{}]; currency filtering is not yet supported",
-                currencies.join(", ")
-            ))
+        return bad_request(format!("limit must not exceed {}", MAX_BREAKDOWN_LIMIT))
             .into_response();
-        }
-        Ok(Err(query_err)) => {
-            tracing::error!(error = %query_err, "cost_breakdown currency lookup failed");
-            return internal_error("internal server error").into_response();
-        }
-        Ok(Ok(summary)) => summary.currency,
-    };
+    }
 
     // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
     let result =
@@ -459,13 +382,13 @@ pub async fn cost_breakdown(
             tracing::error!(error = %query_err, "cost_breakdown query failed");
             internal_error("internal server error").into_response()
         }
-        Ok(Ok(rows)) => (
+        Ok(Ok(result)) => (
             StatusCode::OK,
             Json(BreakdownResponse {
                 metric,
-                currency,
+                currency: result.currency,
                 dimension,
-                rows,
+                rows: result.rows,
             }),
         )
             .into_response(),
@@ -507,13 +430,16 @@ mod tests {
             &self,
             _filter: &CostFilter,
             grouping: Option<domain::dimensions::Dimension>,
-        ) -> Result<Vec<domain::cost::TimeSeriesPoint>, data::queries::summary::QueryError> {
-            Ok(vec![domain::cost::TimeSeriesPoint {
-                period: Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
-                group: grouping.map(|_| "EC2".to_string()),
-                total: 42.0,
-                row_count: 1,
-            }])
+        ) -> Result<domain::cost::TimeSeriesResult, data::queries::summary::QueryError> {
+            Ok(domain::cost::TimeSeriesResult {
+                currency: self.summary.currency.clone(),
+                points: vec![domain::cost::TimeSeriesPoint {
+                    period: Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+                    group: grouping.map(|_| "EC2".to_string()),
+                    total: 42.0,
+                    row_count: 1,
+                }],
+            })
         }
 
         fn breakdown(
@@ -521,12 +447,15 @@ mod tests {
             _filter: &CostFilter,
             _dimension: domain::dimensions::Dimension,
             _limit: usize,
-        ) -> Result<Vec<domain::cost::BreakdownRow>, data::queries::summary::QueryError> {
-            Ok(vec![domain::cost::BreakdownRow {
-                key: Some("EC2".to_string()),
-                total: 42.0,
-                row_count: 1,
-            }])
+        ) -> Result<domain::cost::BreakdownResult, data::queries::summary::QueryError> {
+            Ok(domain::cost::BreakdownResult {
+                currency: self.summary.currency.clone(),
+                rows: vec![domain::cost::BreakdownRow {
+                    key: Some("EC2".to_string()),
+                    total: 42.0,
+                    row_count: 1,
+                }],
+            })
         }
     }
 

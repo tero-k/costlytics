@@ -97,6 +97,24 @@ pub struct BreakdownRow {
     pub row_count: u64,
 }
 
+/// Result of a `CostRepository::timeseries()` call: the series' points plus
+/// the (already currency-checked) single currency for the window, so callers
+/// don't need a second query just to learn the currency.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TimeSeriesResult {
+    pub currency: String,
+    pub points: Vec<TimeSeriesPoint>,
+}
+
+/// Result of a `CostRepository::breakdown()` call: the rows plus the
+/// (already currency-checked) single currency for the window, so callers
+/// don't need a second query just to learn the currency.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BreakdownResult {
+    pub currency: String,
+    pub rows: Vec<BreakdownRow>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

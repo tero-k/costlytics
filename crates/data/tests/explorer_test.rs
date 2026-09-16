@@ -109,7 +109,7 @@ fn timeseries_full_pipeline_focus12() {
     let mut filter = aug_filter();
     filter.granularity = TimeGranularity::Month;
 
-    let points = repo.timeseries(&filter, None).unwrap();
+    let points = repo.timeseries(&filter, None).unwrap().points;
 
     assert_eq!(points.len(), 1, "expected exactly one monthly point");
     assert!(
@@ -135,7 +135,8 @@ fn breakdown_full_pipeline_cur2() {
     let filter = aug_filter();
     let rows = repo
         .breakdown(&filter, Dimension::ChargeCategory, 20)
-        .unwrap();
+        .unwrap()
+        .rows;
 
     let total: f64 = rows.iter().map(|r| r.total).sum();
     assert!(
@@ -191,12 +192,13 @@ fn timeseries_and_breakdown_totals_agree_with_summary() {
 
     let mut ts_filter = filter.clone();
     ts_filter.granularity = TimeGranularity::Month;
-    let points = repo.timeseries(&ts_filter, None).unwrap();
+    let points = repo.timeseries(&ts_filter, None).unwrap().points;
     let timeseries_total: f64 = points.iter().map(|p| p.total).sum();
 
     let rows = repo
         .breakdown(&filter, Dimension::ChargeCategory, 20)
-        .unwrap();
+        .unwrap()
+        .rows;
     let breakdown_total: f64 = rows.iter().map(|r| r.total).sum();
 
     assert!(

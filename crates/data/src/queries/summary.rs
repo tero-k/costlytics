@@ -1,8 +1,16 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
-use domain::cost::{BreakdownRow, CostSummary, TimeSeriesPoint};
+use domain::cost::{BreakdownResult, BreakdownRow, CostSummary, TimeSeriesPoint, TimeSeriesResult};
 use domain::dimensions::Dimension;
 use domain::filters::CostFilter;
 use thiserror::Error;
+
+/// Safety cap on the number of points a single `timeseries()` call may
+/// return, mirroring `MAX_BREAKDOWN_LIMIT` in the API layer. A caller asking
+/// for a wide date range at fine granularity with a high-cardinality
+/// `group_by` could otherwise ask DuckDB (and this process) to materialize
+/// millions of rows. Results are ordered by `period` ascending, so a
+/// truncated result is still a sensible prefix (earliest periods first).
+const MAX_TIMESERIES_POINTS: usize = 10_000;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -24,14 +32,14 @@ pub trait CostRepository: Send + Sync {
         &self,
         filter: &CostFilter,
         grouping: Option<Dimension>,
-    ) -> Result<Vec<TimeSeriesPoint>, QueryError>;
+    ) -> Result<TimeSeriesResult, QueryError>;
 
     fn breakdown(
         &self,
         filter: &CostFilter,
         dimension: Dimension,
         limit: usize,
-    ) -> Result<Vec<BreakdownRow>, QueryError>;
+    ) -> Result<BreakdownResult, QueryError>;
 }
 
 pub struct DuckDbCostRepository {
@@ -110,7 +118,7 @@ impl CostRepository for DuckDbCostRepository {
         &self,
         filter: &CostFilter,
         grouping: Option<Dimension>,
-    ) -> Result<Vec<TimeSeriesPoint>, QueryError> {
+    ) -> Result<TimeSeriesResult, QueryError> {
         let conn = self.pool.get()?;
 
         let metric_col = filter.metric.column_name();
@@ -119,7 +127,7 @@ impl CostRepository for DuckDbCostRepository {
         let start_str = filter.start.format("%Y-%m-%d %H:%M:%S").to_string();
         let end_str = filter.end.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        check_single_currency(&conn, &start_str, &end_str)?;
+        let currency = check_single_currency(&conn, &start_str, &end_str)?;
 
         let points = match grouping {
             None => {
@@ -129,19 +137,23 @@ impl CostRepository for DuckDbCostRepository {
                      FROM normalized_cost \
                      WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
                      GROUP BY period \
-                     ORDER BY period",
+                     ORDER BY period \
+                     LIMIT ?",
                     unit = unit,
                     metric = metric_col
                 );
 
                 let mut stmt = conn.prepare(&sql)?;
                 let rows: Vec<(String, f64, i64)> = stmt
-                    .query_map(duckdb::params![start_str, end_str], |row| {
-                        let period: String = row.get(0)?;
-                        let total: f64 = row.get(1)?;
-                        let row_count: i64 = row.get(2)?;
-                        Ok((period, total, row_count))
-                    })?
+                    .query_map(
+                        duckdb::params![start_str, end_str, MAX_TIMESERIES_POINTS as i64],
+                        |row| {
+                            let period: String = row.get(0)?;
+                            let total: f64 = row.get(1)?;
+                            let row_count: i64 = row.get(2)?;
+                            Ok((period, total, row_count))
+                        },
+                    )?
                     .collect::<Result<_, _>>()?;
 
                 rows.into_iter()
@@ -163,7 +175,8 @@ impl CostRepository for DuckDbCostRepository {
                      FROM normalized_cost \
                      WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
                      GROUP BY period, grp \
-                     ORDER BY period, grp",
+                     ORDER BY period, grp \
+                     LIMIT ?",
                     unit = unit,
                     dim_col = dim_col,
                     metric = metric_col
@@ -171,13 +184,16 @@ impl CostRepository for DuckDbCostRepository {
 
                 let mut stmt = conn.prepare(&sql)?;
                 let rows: Vec<(String, Option<String>, f64, i64)> = stmt
-                    .query_map(duckdb::params![start_str, end_str], |row| {
-                        let period: String = row.get(0)?;
-                        let grp: Option<String> = row.get(1)?;
-                        let total: f64 = row.get(2)?;
-                        let row_count: i64 = row.get(3)?;
-                        Ok((period, grp, total, row_count))
-                    })?
+                    .query_map(
+                        duckdb::params![start_str, end_str, MAX_TIMESERIES_POINTS as i64],
+                        |row| {
+                            let period: String = row.get(0)?;
+                            let grp: Option<String> = row.get(1)?;
+                            let total: f64 = row.get(2)?;
+                            let row_count: i64 = row.get(3)?;
+                            Ok((period, grp, total, row_count))
+                        },
+                    )?
                     .collect::<Result<_, _>>()?;
 
                 rows.into_iter()
@@ -193,7 +209,7 @@ impl CostRepository for DuckDbCostRepository {
             }
         };
 
-        Ok(points)
+        Ok(TimeSeriesResult { currency, points })
     }
 
     fn breakdown(
@@ -201,7 +217,7 @@ impl CostRepository for DuckDbCostRepository {
         filter: &CostFilter,
         dimension: Dimension,
         limit: usize,
-    ) -> Result<Vec<BreakdownRow>, QueryError> {
+    ) -> Result<BreakdownResult, QueryError> {
         let conn = self.pool.get()?;
 
         let metric_col = filter.metric.column_name();
@@ -210,7 +226,7 @@ impl CostRepository for DuckDbCostRepository {
         let start_str = filter.start.format("%Y-%m-%d %H:%M:%S").to_string();
         let end_str = filter.end.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        check_single_currency(&conn, &start_str, &end_str)?;
+        let currency = check_single_currency(&conn, &start_str, &end_str)?;
 
         let sql = format!(
             "SELECT {dim_col} AS grp, SUM({metric}) AS total, COUNT(*) AS row_count \
@@ -237,18 +253,21 @@ impl CostRepository for DuckDbCostRepository {
             })?
             .collect::<Result<_, _>>()?;
 
-        Ok(rows)
+        Ok(BreakdownResult { currency, rows })
     }
 }
 
 /// Detect a multi-currency situation for the given window: refuse to silently
 /// report a partial total. Shared by `timeseries()` and `breakdown()` (`summary()`
 /// computes currency totals directly since it needs the per-currency breakdown).
+///
+/// Returns the single currency present in the window, or `""` if the window
+/// contains no rows at all (consistent with `summary()`'s empty-range behavior).
 fn check_single_currency(
     conn: &duckdb::Connection,
     start_str: &str,
     end_str: &str,
-) -> Result<(), QueryError> {
+) -> Result<String, QueryError> {
     let sql = "SELECT DISTINCT currency FROM normalized_cost \
                WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
                ORDER BY currency";
@@ -260,7 +279,7 @@ fn check_single_currency(
     if currencies.len() > 1 {
         return Err(QueryError::MultipleCurrencies(currencies));
     }
-    Ok(())
+    Ok(currencies.into_iter().next().unwrap_or_default())
 }
 
 /// Parse a timestamp string produced by `CAST(... AS VARCHAR)` on a DuckDB
@@ -549,7 +568,9 @@ mod tests {
         let mut filter = CostFilter::date_range(start, end);
         filter.granularity = domain::filters::TimeGranularity::Month;
 
-        let points = repo.timeseries(&filter, None).unwrap();
+        let result = repo.timeseries(&filter, None).unwrap();
+        assert_eq!(result.currency, "USD");
+        let points = result.points;
 
         assert_eq!(points.len(), 1);
         let p = &points[0];
@@ -574,7 +595,7 @@ mod tests {
         let mut filter = CostFilter::date_range(start, end);
         filter.granularity = domain::filters::TimeGranularity::Day;
 
-        let points = repo.timeseries(&filter, None).unwrap();
+        let points = repo.timeseries(&filter, None).unwrap().points;
 
         assert_eq!(points.len(), 2);
 
@@ -608,7 +629,8 @@ mod tests {
 
         let points = repo
             .timeseries(&filter, Some(domain::dimensions::Dimension::Service))
-            .unwrap();
+            .unwrap()
+            .points;
 
         assert_eq!(points.len(), 2);
 
@@ -660,9 +682,11 @@ mod tests {
         let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
         let filter = CostFilter::date_range(start, end);
 
-        let rows = repo
+        let result = repo
             .breakdown(&filter, domain::dimensions::Dimension::Service, 10)
             .unwrap();
+        assert_eq!(result.currency, "USD");
+        let rows = result.rows;
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].key.as_deref(), Some("EC2"));
@@ -686,7 +710,8 @@ mod tests {
 
         let rows = repo
             .breakdown(&filter, domain::dimensions::Dimension::Service, 1)
-            .unwrap();
+            .unwrap()
+            .rows;
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].key.as_deref(), Some("EC2"));
