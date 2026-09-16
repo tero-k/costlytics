@@ -14,6 +14,8 @@ pub fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .route("/api/v1/health", get(handlers::health))
         .route("/api/v1/cost/summary", post(handlers::cost_summary))
+        .route("/api/v1/cost/timeseries", post(handlers::cost_timeseries))
+        .route("/api/v1/cost/breakdown", post(handlers::cost_breakdown))
         .with_state(state);
 
     // Security headers via tower-http
