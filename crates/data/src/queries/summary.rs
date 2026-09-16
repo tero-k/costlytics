@@ -1376,6 +1376,102 @@ mod tests {
         }
     }
 
+    /// A current period with zero matching rows (previous period has real
+    /// data) must resolve to the previous period's currency, not error and
+    /// not be mistaken for a currency conflict. This exercises the
+    /// `current_currency.is_empty()` branch of compare()'s currency
+    /// resolution, the mirror image of
+    /// `compare_empty_previous_period_does_not_error`.
+    #[test]
+    fn compare_empty_current_period_does_not_error() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        // January 2026: no rows in the fixture at all.
+        let current = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap(),
+        );
+        let previous = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        );
+
+        let result = repo.compare(&current, &previous, None).unwrap();
+        assert_eq!(result.currency, "USD");
+        assert_eq!(result.rows.len(), 1);
+
+        let row = &result.rows[0];
+        assert_eq!(row.current, 0.0);
+        assert!((row.previous - 1234.56).abs() < 1e-6, "previous: {}", row.previous);
+        let pct = row.percentage_change.expect("percentage_change present");
+        assert!((pct - (-100.0)).abs() < 1e-6, "percentage_change: {}", pct);
+    }
+
+    // -----------------------------------------------------------------------
+    // EUR-only fixture (July 2026), used together with INLINE_SELECT
+    // (USD-only, August 2026) to exercise a genuine *cross-period* currency
+    // mismatch in compare() — as opposed to TWO_CURRENCY_SELECT, which mixes
+    // USD and EUR within a single period and so trips check_single_currency's
+    // own internal single-period guard before compare()'s cross-period
+    // comparison logic is ever reached.
+    // -----------------------------------------------------------------------
+    const EUR_ONLY_JULY_SELECT: &str = r#"
+            SELECT
+                TIMESTAMP '2026-07-01 00:00:00' AS BillingPeriodStart,
+                TIMESTAMP '2026-08-01 00:00:00' AS BillingPeriodEnd,
+                TIMESTAMP '2026-07-10 00:00:00' AS ChargePeriodStart,
+                TIMESTAMP '2026-07-11 00:00:00' AS ChargePeriodEnd,
+                'acct-001' AS BillingAccountId, 'Acct' AS BillingAccountName,
+                'sub-001' AS SubAccountId, 'Sub' AS SubAccountName,
+                'AWS' AS ProviderName, 'Amazon' AS PublisherName,
+                'EC2' AS ServiceName, 'Compute' AS ServiceCategory, 'VMs' AS ServiceSubcategory,
+                'us-east-1' AS RegionName, 'us-east-1a' AS AvailabilityZone,
+                'r-3' AS ResourceId, 'r' AS ResourceName, 't' AS ResourceType,
+                'Usage' AS ChargeCategory, NULL::VARCHAR AS ChargeClass,
+                'Recurring' AS ChargeFrequency, 'desc' AS ChargeDescription, 'OnDemand' AS PricingCategory,
+                1.0 AS ConsumedQuantity, 'Hours' AS ConsumedUnit,
+                300.0 AS BilledCost, 300.0 AS EffectiveCost,
+                300.0 AS ListCost, 300.0 AS ContractedCost,
+                'EUR' AS BillingCurrency,
+                NULL::MAP(VARCHAR, VARCHAR) AS Tags,
+                NULL::VARCHAR AS CommitmentDiscountId,
+                NULL::VARCHAR AS CommitmentDiscountType,
+                NULL::VARCHAR AS CommitmentDiscountStatus,
+                NULL::VARCHAR AS x_ServiceCode
+        "#;
+
+    /// A genuine cross-period currency mismatch: the current period (August,
+    /// USD-only) and previous period (July, EUR-only) are each internally
+    /// single-currency, so `check_single_currency` accepts both individually
+    /// — the conflict can only be caught by compare()'s cross-period
+    /// comparison, which is exactly the `else` branch this test targets.
+    #[test]
+    fn compare_cross_period_currency_mismatch_returns_error() {
+        let (_dir1, path1) = write_parquet(INLINE_SELECT);
+        let (_dir2, path2) = write_parquet(EUR_ONLY_JULY_SELECT);
+        let pool = build_test_pool(&[path1, path2]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let current = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        );
+        let previous = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+        );
+
+        let err = repo.compare(&current, &previous, None).unwrap_err();
+        match err {
+            QueryError::MultipleCurrencies(currencies) => {
+                assert_eq!(currencies, vec!["EUR", "USD"]);
+            }
+            other => panic!("expected MultipleCurrencies error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn distinct_services_respects_limit_cap() {
         // Sanity check that the bound LIMIT ? is actually wired up: with
