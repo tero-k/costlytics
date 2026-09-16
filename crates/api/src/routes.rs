@@ -16,6 +16,27 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/cost/summary", post(handlers::cost_summary))
         .route("/api/v1/cost/timeseries", post(handlers::cost_timeseries))
         .route("/api/v1/cost/breakdown", post(handlers::cost_breakdown))
+        .route("/api/v1/cost/compare", post(handlers::cost_compare))
+        .route(
+            "/api/v1/filter-values/services",
+            get(handlers::filter_values_services),
+        )
+        .route(
+            "/api/v1/filter-values/accounts",
+            get(handlers::filter_values_accounts),
+        )
+        .route(
+            "/api/v1/filter-values/regions",
+            get(handlers::filter_values_regions),
+        )
+        .route(
+            "/api/v1/filter-values/tag-keys",
+            get(handlers::filter_values_tag_keys),
+        )
+        .route(
+            "/api/v1/filter-values/tag-values",
+            get(handlers::filter_values_tag_values),
+        )
         .with_state(state);
 
     // Security headers via tower-http

@@ -1,9 +1,9 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use data::queries::summary::{CostRepository, QueryError};
 use domain::{
     cost::{BreakdownRow, CostMetric, TimeSeriesPoint},
@@ -91,6 +91,71 @@ struct ResolvedRequest {
     filter: CostFilter,
 }
 
+/// Validates a single `(start, end)` date pair — `start` before `end`, and
+/// the range not exceeding [`MAX_DATE_RANGE_DAYS`] — and converts both bounds
+/// to UTC `DateTime`s at midnight.
+///
+/// Factored out of `resolve_common` so that handlers needing more than one
+/// independent date-range pair (namely `cost_compare`, with its `current` and
+/// `previous` ranges) can validate each pair through this single code path
+/// instead of hand-copying the checks.
+fn validate_date_range(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), Box<Response>> {
+    // Validate: start must be before end
+    if start >= end {
+        return Err(Box::new(bad_request("start must be before end").into_response()));
+    }
+
+    // Validate: date range must not exceed 5 years (~1827 days)
+    let days = (end - start).num_days();
+    if days > MAX_DATE_RANGE_DAYS {
+        return Err(Box::new(
+            bad_request("date range must not exceed 5 years").into_response(),
+        ));
+    }
+
+    // Convert NaiveDate to DateTime<Utc> at midnight UTC
+    let start = Utc.from_utc_datetime(&start.and_hms_opt(0, 0, 0).unwrap());
+    let end = Utc.from_utc_datetime(&end.and_hms_opt(0, 0, 0).unwrap());
+
+    Ok((start, end))
+}
+
+/// Parses the optional `metric` request field, defaulting to
+/// [`CostMetric::default`] when absent.
+fn resolve_metric(metric: Option<&str>) -> Result<CostMetric, Box<Response>> {
+    match metric {
+        Some(m) => parse_metric(m)
+            .ok_or_else(|| Box::new(bad_request(format!("unknown metric '{}'", m)).into_response())),
+        None => Ok(CostMetric::default()),
+    }
+}
+
+/// Resolves `source_id` against `state.repos`, defaulting to the first
+/// configured source when absent.
+fn resolve_source(
+    state: &AppState,
+    source_id: Option<&str>,
+) -> Result<Arc<dyn CostRepository>, Box<Response>> {
+    let source_id = if let Some(id) = source_id {
+        id.to_string()
+    } else {
+        match state.config.sources.first() {
+            Some(src) => src.id.clone(),
+            None => return Err(Box::new(bad_request("no sources configured").into_response())),
+        }
+    };
+
+    match state.repos.get(&source_id) {
+        Some(r) => Ok(r.clone()),
+        None => Err(Box::new(
+            bad_request(format!("unknown source_id '{}'", source_id)).into_response(),
+        )),
+    }
+}
+
 /// Shared request preamble for the `/cost/*` handlers: validates the date
 /// range, parses the metric, resolves `source_id` against `state.repos`
 /// (defaulting to the first configured source), converts the `NaiveDate`
@@ -105,56 +170,9 @@ fn resolve_common(
     end: NaiveDate,
     metric: Option<&str>,
 ) -> Result<ResolvedRequest, Box<Response>> {
-    // Validate: start must be before end
-    if start >= end {
-        return Err(Box::new(bad_request("start must be before end").into_response()));
-    }
-
-    // Validate: date range must not exceed 5 years (~1827 days)
-    let days = (end - start).num_days();
-    if days > MAX_DATE_RANGE_DAYS {
-        return Err(Box::new(
-            bad_request("date range must not exceed 5 years").into_response(),
-        ));
-    }
-
-    // Parse metric
-    let metric = if let Some(m) = metric {
-        match parse_metric(m) {
-            Some(metric) => metric,
-            None => {
-                return Err(Box::new(
-                    bad_request(format!("unknown metric '{}'", m)).into_response(),
-                ))
-            }
-        }
-    } else {
-        CostMetric::default()
-    };
-
-    // Resolve source_id: use provided or fall back to first configured source
-    let source_id = if let Some(id) = source_id {
-        id.to_string()
-    } else {
-        match state.config.sources.first() {
-            Some(src) => src.id.clone(),
-            None => return Err(Box::new(bad_request("no sources configured").into_response())),
-        }
-    };
-
-    // Look up repo
-    let repo = match state.repos.get(&source_id) {
-        Some(r) => r.clone(),
-        None => {
-            return Err(Box::new(
-                bad_request(format!("unknown source_id '{}'", source_id)).into_response(),
-            ))
-        }
-    };
-
-    // Convert NaiveDate to DateTime<Utc> at midnight UTC
-    let start = Utc.from_utc_datetime(&start.and_hms_opt(0, 0, 0).unwrap());
-    let end = Utc.from_utc_datetime(&end.and_hms_opt(0, 0, 0).unwrap());
+    let (start, end) = validate_date_range(start, end)?;
+    let metric = resolve_metric(metric)?;
+    let repo = resolve_source(state, source_id)?;
 
     let mut filter = CostFilter::date_range(start, end);
     filter.metric = metric;
@@ -393,6 +411,214 @@ pub async fn cost_breakdown(
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/cost/compare
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CompareRequest {
+    pub source_id: Option<String>,
+    pub current_start: NaiveDate,
+    pub current_end: NaiveDate,
+    pub previous_start: NaiveDate,
+    pub previous_end: NaiveDate,
+    pub metric: Option<String>,
+    pub dimension: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CompareResponse {
+    pub metric: CostMetric,
+    pub currency: String,
+    pub dimension: Option<Dimension>,
+    pub rows: Vec<domain::cost::CompareRow>,
+}
+
+pub async fn cost_compare(
+    State(state): State<AppState>,
+    Json(body): Json<CompareRequest>,
+) -> impl IntoResponse {
+    // Validate both date-range pairs through the same path `resolve_common`
+    // uses for its single pair — no hand-copied start/end or max-range checks.
+    let (current_start, current_end) =
+        match validate_date_range(body.current_start, body.current_end) {
+            Ok(range) => range,
+            Err(resp) => return *resp,
+        };
+    let (previous_start, previous_end) =
+        match validate_date_range(body.previous_start, body.previous_end) {
+            Ok(range) => range,
+            Err(resp) => return *resp,
+        };
+
+    let metric = match resolve_metric(body.metric.as_deref()) {
+        Ok(m) => m,
+        Err(resp) => return *resp,
+    };
+
+    let repo = match resolve_source(&state, body.source_id.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    // Parse dimension (optional — unlike breakdown, compare without one is a
+    // valid, meaningful single aggregate row)
+    let dimension = match body.dimension {
+        Some(ref d) => match parse_dimension(d) {
+            Some(dim) => Some(dim),
+            None => return bad_request(format!("unknown dimension '{}'", d)).into_response(),
+        },
+        None => None,
+    };
+
+    let mut current_filter = CostFilter::date_range(current_start, current_end);
+    current_filter.metric = metric;
+    let mut previous_filter = CostFilter::date_range(previous_start, previous_end);
+    previous_filter.metric = metric;
+
+    // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
+    let result = tokio::task::spawn_blocking(move || {
+        repo.compare(&current_filter, &previous_filter, dimension)
+    })
+    .await;
+
+    match result {
+        Err(join_err) => {
+            tracing::error!(error = %join_err, "cost_compare task panicked");
+            internal_error("internal server error").into_response()
+        }
+        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
+            "multiple currencies present: [{}]; currency filtering is not yet supported",
+            currencies.join(", ")
+        ))
+        .into_response(),
+        Ok(Err(query_err)) => {
+            tracing::error!(error = %query_err, "cost_compare query failed");
+            internal_error("internal server error").into_response()
+        }
+        Ok(Ok(result)) => (
+            StatusCode::OK,
+            Json(CompareResponse {
+                metric,
+                currency: result.currency,
+                dimension,
+                rows: result.rows,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/filter-values/{services,accounts,regions,tag-keys,tag-values}
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct FilterValuesQuery {
+    pub source_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TagValuesQuery {
+    pub source_id: Option<String>,
+    pub key: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FilterValuesResponse {
+    pub values: Vec<String>,
+}
+
+/// Shared response handling for the filter-value lookup endpoints: runs the
+/// blocking DuckDB call and maps errors consistently with the `/cost/*`
+/// handlers (including the 409 for `MultipleCurrencies`, even though none of
+/// these queries are expected to hit it — keeps the mapping uniform).
+async fn respond_with_values(
+    result: Result<Result<Vec<String>, QueryError>, tokio::task::JoinError>,
+    op: &str,
+) -> Response {
+    match result {
+        Err(join_err) => {
+            tracing::error!(error = %join_err, op, "filter-values task panicked");
+            internal_error("internal server error").into_response()
+        }
+        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
+            "multiple currencies present: [{}]; currency filtering is not yet supported",
+            currencies.join(", ")
+        ))
+        .into_response(),
+        Ok(Err(query_err)) => {
+            tracing::error!(error = %query_err, op, "filter-values query failed");
+            internal_error("internal server error").into_response()
+        }
+        Ok(Ok(values)) => (StatusCode::OK, Json(FilterValuesResponse { values })).into_response(),
+    }
+}
+
+pub async fn filter_values_services(
+    State(state): State<AppState>,
+    Query(query): Query<FilterValuesQuery>,
+) -> impl IntoResponse {
+    let repo = match resolve_source(&state, query.source_id.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let result = tokio::task::spawn_blocking(move || repo.distinct_services()).await;
+    respond_with_values(result, "distinct_services").await
+}
+
+pub async fn filter_values_accounts(
+    State(state): State<AppState>,
+    Query(query): Query<FilterValuesQuery>,
+) -> impl IntoResponse {
+    let repo = match resolve_source(&state, query.source_id.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let result = tokio::task::spawn_blocking(move || repo.distinct_accounts()).await;
+    respond_with_values(result, "distinct_accounts").await
+}
+
+pub async fn filter_values_regions(
+    State(state): State<AppState>,
+    Query(query): Query<FilterValuesQuery>,
+) -> impl IntoResponse {
+    let repo = match resolve_source(&state, query.source_id.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let result = tokio::task::spawn_blocking(move || repo.distinct_regions()).await;
+    respond_with_values(result, "distinct_regions").await
+}
+
+pub async fn filter_values_tag_keys(
+    State(state): State<AppState>,
+    Query(query): Query<FilterValuesQuery>,
+) -> impl IntoResponse {
+    let repo = match resolve_source(&state, query.source_id.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let result = tokio::task::spawn_blocking(move || repo.distinct_tag_keys()).await;
+    respond_with_values(result, "distinct_tag_keys").await
+}
+
+pub async fn filter_values_tag_values(
+    State(state): State<AppState>,
+    Query(query): Query<TagValuesQuery>,
+) -> impl IntoResponse {
+    let key = match query.key {
+        Some(k) if !k.is_empty() => k,
+        _ => return bad_request("key is required").into_response(),
+    };
+    let repo = match resolve_source(&state, query.source_id.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let result = tokio::task::spawn_blocking(move || repo.distinct_tag_values(&key)).await;
+    respond_with_values(result, "distinct_tag_values").await
 }
 
 // ---------------------------------------------------------------------------
@@ -738,5 +964,124 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn filter_values_services_returns_200() {
+        let app = build_router(make_state());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/filter-values/services")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["values"], serde_json::json!(["EC2", "S3"]));
+    }
+
+    #[tokio::test]
+    async fn filter_values_tag_values_missing_key_returns_400() {
+        let app = build_router(make_state());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/filter-values/tag-values")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn compare_valid_request_returns_200() {
+        let app = build_router(make_state());
+        let payload = serde_json::json!({
+            "current_start": "2026-08-01",
+            "current_end": "2026-09-01",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-08-01",
+            "metric": "amortized",
+            "dimension": "service"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["currency"], "USD");
+        assert_eq!(json["dimension"], "service");
+        assert_eq!(json["rows"][0]["key"], "EC2");
+        assert_eq!(json["rows"][0]["current"], 42.0);
+        assert_eq!(json["rows"][0]["previous"], 40.0);
+    }
+
+    #[tokio::test]
+    async fn compare_invalid_current_range_returns_400() {
+        let app = build_router(make_state());
+        let payload = serde_json::json!({
+            "current_start": "2026-09-01",
+            "current_end": "2026-08-01",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-08-01"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn compare_invalid_previous_range_returns_400() {
+        let app = build_router(make_state());
+        let payload = serde_json::json!({
+            "current_start": "2026-08-01",
+            "current_end": "2026-09-01",
+            "previous_start": "2026-08-01",
+            "previous_end": "2026-07-01"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn compare_without_dimension_returns_200() {
+        let app = build_router(make_state());
+        let payload = serde_json::json!({
+            "current_start": "2026-08-01",
+            "current_end": "2026-09-01",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-08-01"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["dimension"], serde_json::Value::Null);
+        assert_eq!(json["rows"][0]["key"], serde_json::Value::Null);
     }
 }
