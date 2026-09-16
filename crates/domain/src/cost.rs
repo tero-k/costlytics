@@ -115,6 +115,30 @@ pub struct BreakdownResult {
     pub rows: Vec<BreakdownRow>,
 }
 
+/// One row in a period-over-period comparison (e.g. "cost by service, this
+/// month vs. last month").
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CompareRow {
+    /// Dimension value for this row; `None` when `compare()` was called with
+    /// `dimension: None` (a single aggregate row for the whole filtered range),
+    /// or when the canonical column was NULL in the source data.
+    pub key: Option<String>,
+    pub current: f64,
+    pub previous: f64,
+    pub absolute_change: f64,
+    /// `None` when `previous == 0` (percentage change is undefined/infinite).
+    pub percentage_change: Option<f64>,
+}
+
+/// Result of a `CostRepository::compare()` call: the rows plus the
+/// (already currency-checked, and confirmed matching across both periods)
+/// single currency, so callers don't need a second query just to learn it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompareResult {
+    pub currency: String,
+    pub rows: Vec<CompareRow>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

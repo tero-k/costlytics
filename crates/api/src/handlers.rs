@@ -458,6 +458,24 @@ mod tests {
             })
         }
 
+        fn compare(
+            &self,
+            _current: &CostFilter,
+            _previous: &CostFilter,
+            dimension: Option<domain::dimensions::Dimension>,
+        ) -> Result<domain::cost::CompareResult, data::queries::summary::QueryError> {
+            Ok(domain::cost::CompareResult {
+                currency: self.summary.currency.clone(),
+                rows: vec![domain::cost::CompareRow {
+                    key: dimension.map(|_| "EC2".to_string()),
+                    current: 42.0,
+                    previous: 40.0,
+                    absolute_change: 2.0,
+                    percentage_change: Some(5.0),
+                }],
+            })
+        }
+
         fn distinct_services(&self) -> Result<Vec<String>, data::queries::summary::QueryError> {
             Ok(vec!["EC2".to_string(), "S3".to_string()])
         }
