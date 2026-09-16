@@ -1,5 +1,8 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
-use domain::cost::{BreakdownResult, BreakdownRow, CostSummary, TimeSeriesPoint, TimeSeriesResult};
+use domain::cost::{
+    BreakdownResult, BreakdownRow, CostSummary, TimeSeriesPoint, TimeSeriesResult, COL_ACCOUNT_ID,
+    COL_REGION, COL_SERVICE_NAME, COL_TAGS,
+};
 use domain::dimensions::Dimension;
 use domain::filters::CostFilter;
 use thiserror::Error;
@@ -11,6 +14,13 @@ use thiserror::Error;
 /// millions of rows. Results are ordered by `period` ascending, so a
 /// truncated result is still a sensible prefix (earliest periods first).
 const MAX_TIMESERIES_POINTS: usize = 10_000;
+
+/// Safety cap on the number of distinct values returned by the
+/// `distinct_*` filter-value lookup methods (used to populate dropdown
+/// filters in the UI). These queries are not scoped to a date range, so an
+/// unbounded dataset with high-cardinality columns (e.g. resource IDs
+/// masquerading as tag values) could otherwise return an unbounded result.
+const MAX_FILTER_VALUES: usize = 1000;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -40,6 +50,23 @@ pub trait CostRepository: Send + Sync {
         dimension: Dimension,
         limit: usize,
     ) -> Result<BreakdownResult, QueryError>;
+
+    /// Distinct, sorted service names across the whole dataset (not scoped to
+    /// a date range) — used to populate dropdown filters.
+    fn distinct_services(&self) -> Result<Vec<String>, QueryError>;
+
+    /// Distinct, sorted account IDs across the whole dataset.
+    fn distinct_accounts(&self) -> Result<Vec<String>, QueryError>;
+
+    /// Distinct, sorted regions across the whole dataset.
+    fn distinct_regions(&self) -> Result<Vec<String>, QueryError>;
+
+    /// Distinct, sorted tag keys across the whole dataset.
+    fn distinct_tag_keys(&self) -> Result<Vec<String>, QueryError>;
+
+    /// Distinct, sorted tag values for a single tag key across the whole
+    /// dataset.
+    fn distinct_tag_values(&self, key: &str) -> Result<Vec<String>, QueryError>;
 }
 
 pub struct DuckDbCostRepository {
@@ -254,6 +281,87 @@ impl CostRepository for DuckDbCostRepository {
             .collect::<Result<_, _>>()?;
 
         Ok(BreakdownResult { currency, rows })
+    }
+
+    fn distinct_services(&self) -> Result<Vec<String>, QueryError> {
+        self.distinct_column_values(COL_SERVICE_NAME)
+    }
+
+    fn distinct_accounts(&self) -> Result<Vec<String>, QueryError> {
+        self.distinct_column_values(COL_ACCOUNT_ID)
+    }
+
+    fn distinct_regions(&self) -> Result<Vec<String>, QueryError> {
+        self.distinct_column_values(COL_REGION)
+    }
+
+    fn distinct_tag_keys(&self) -> Result<Vec<String>, QueryError> {
+        let conn = self.pool.get()?;
+
+        let sql = format!(
+            "SELECT DISTINCT k FROM ( \
+                SELECT UNNEST(map_keys({tags})) AS k \
+                FROM normalized_cost WHERE {tags} IS NOT NULL \
+             ) \
+             ORDER BY k \
+             LIMIT ?",
+            tags = COL_TAGS
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let keys: Vec<String> = stmt
+            .query_map(duckdb::params![MAX_FILTER_VALUES as i64], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        Ok(keys)
+    }
+
+    fn distinct_tag_values(&self, key: &str) -> Result<Vec<String>, QueryError> {
+        let conn = self.pool.get()?;
+
+        let sql = format!(
+            "SELECT DISTINCT v FROM ( \
+                SELECT UNNEST(map_keys({tags})) AS k, UNNEST(map_values({tags})) AS v \
+                FROM normalized_cost WHERE {tags} IS NOT NULL \
+             ) \
+             WHERE k = ? \
+             ORDER BY v \
+             LIMIT ?",
+            tags = COL_TAGS
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let values: Vec<String> = stmt
+            .query_map(duckdb::params![key, MAX_FILTER_VALUES as i64], |row| {
+                row.get(0)
+            })?
+            .collect::<Result<_, _>>()?;
+
+        Ok(values)
+    }
+}
+
+impl DuckDbCostRepository {
+    /// Shared implementation for `distinct_services`/`distinct_accounts`/
+    /// `distinct_regions`: distinct, sorted, non-null values of a single
+    /// column across the whole dataset, capped at `MAX_FILTER_VALUES`.
+    fn distinct_column_values(&self, column: &str) -> Result<Vec<String>, QueryError> {
+        let conn = self.pool.get()?;
+
+        let sql = format!(
+            "SELECT DISTINCT {column} FROM normalized_cost \
+             WHERE {column} IS NOT NULL \
+             ORDER BY {column} \
+             LIMIT ?",
+            column = column
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let values: Vec<String> = stmt
+            .query_map(duckdb::params![MAX_FILTER_VALUES as i64], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        Ok(values)
     }
 }
 
@@ -736,5 +844,169 @@ mod tests {
             }
             other => panic!("expected MultipleCurrencies error, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // distinct_* filter-value lookup tests
+    // -----------------------------------------------------------------------
+
+    /// Three rows carrying real tag data (unlike the shared fixtures above,
+    /// whose `Tags` column is always NULL) plus varied service/account/region
+    /// values, to exercise `distinct_services`/`distinct_accounts`/
+    /// `distinct_regions`/`distinct_tag_keys`/`distinct_tag_values`.
+    const TAGGED_SELECT: &str = r#"
+        SELECT
+            TIMESTAMP '2026-08-01 00:00:00'  AS BillingPeriodStart,
+            TIMESTAMP '2026-09-01 00:00:00'  AS BillingPeriodEnd,
+            TIMESTAMP '2026-08-10 00:00:00'  AS ChargePeriodStart,
+            TIMESTAMP '2026-08-11 00:00:00'  AS ChargePeriodEnd,
+            'acct-001'      AS BillingAccountId,
+            'Acct Name'     AS BillingAccountName,
+            'sub-001'       AS SubAccountId,
+            'Sub Name'      AS SubAccountName,
+            'AWS'           AS ProviderName,
+            'Amazon'        AS PublisherName,
+            'EC2'           AS ServiceName,
+            'Compute'       AS ServiceCategory,
+            'VMs'           AS ServiceSubcategory,
+            'us-east-1'     AS RegionName,
+            'us-east-1a'    AS AvailabilityZone,
+            'i-abc123'      AS ResourceId,
+            'my-instance'   AS ResourceName,
+            'm5.large'      AS ResourceType,
+            'Usage'         AS ChargeCategory,
+            NULL::VARCHAR   AS ChargeClass,
+            'Recurring'     AS ChargeFrequency,
+            'EC2 usage'     AS ChargeDescription,
+            'OnDemand'      AS PricingCategory,
+            8.0             AS ConsumedQuantity,
+            'Hours'         AS ConsumedUnit,
+            1100.00         AS BilledCost,
+            1034.56         AS EffectiveCost,
+            1500.00         AS ListCost,
+            1200.00         AS ContractedCost,
+            'USD'           AS BillingCurrency,
+            map {'Environment': 'production', 'Team': 'platform'} AS Tags,
+            NULL::VARCHAR   AS CommitmentDiscountId,
+            NULL::VARCHAR   AS CommitmentDiscountType,
+            NULL::VARCHAR   AS CommitmentDiscountStatus,
+            NULL::VARCHAR   AS x_ServiceCode
+        UNION ALL
+        SELECT
+            TIMESTAMP '2026-08-01 00:00:00',
+            TIMESTAMP '2026-09-01 00:00:00',
+            TIMESTAMP '2026-08-20 00:00:00',
+            TIMESTAMP '2026-08-21 00:00:00',
+            'acct-002', 'Acct Name 2', 'sub-002', 'Sub Name 2',
+            'AWS', 'Amazon',
+            'S3', 'Storage', 'Object Storage',
+            'eu-west-1', 'eu-west-1a',
+            'bucket-abc', 'my-bucket', 'S3Bucket',
+            'Usage', NULL::VARCHAR, 'Recurring', 'S3 usage', 'OnDemand',
+            100.0, 'GB',
+            0.00, 200.00, 0.00, 0.00,
+            'USD',
+            map {'Environment': 'staging'},
+            NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR,
+            NULL::VARCHAR
+        UNION ALL
+        SELECT
+            TIMESTAMP '2026-08-01 00:00:00',
+            TIMESTAMP '2026-09-01 00:00:00',
+            TIMESTAMP '2026-08-25 00:00:00',
+            TIMESTAMP '2026-08-26 00:00:00',
+            'acct-001', 'Acct Name', 'sub-001', 'Sub Name',
+            'AWS', 'Amazon',
+            'EC2', 'Compute', 'VMs',
+            'us-east-1', 'us-east-1a',
+            'i-def456', 'my-instance-2', 'm5.large',
+            'Usage', NULL::VARCHAR, 'Recurring', 'EC2 usage', 'OnDemand',
+            4.0, 'Hours',
+            50.00, 50.00, 50.00, 50.00,
+            'USD',
+            NULL::MAP(VARCHAR, VARCHAR),
+            NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR,
+            NULL::VARCHAR
+    "#;
+
+    #[test]
+    fn distinct_services_returns_sorted_unique() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let services = repo.distinct_services().unwrap();
+        assert_eq!(services, vec!["EC2".to_string(), "S3".to_string()]);
+    }
+
+    #[test]
+    fn distinct_accounts_returns_sorted_unique() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        // account_id maps from SubAccountId (see focus12 adapter), not
+        // BillingAccountId.
+        let accounts = repo.distinct_accounts().unwrap();
+        assert_eq!(accounts, vec!["sub-001".to_string(), "sub-002".to_string()]);
+    }
+
+    #[test]
+    fn distinct_regions_returns_sorted_unique() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let regions = repo.distinct_regions().unwrap();
+        assert_eq!(
+            regions,
+            vec!["eu-west-1".to_string(), "us-east-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn distinct_tag_keys_returns_all_keys_across_rows() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let keys = repo.distinct_tag_keys().unwrap();
+        assert_eq!(keys, vec!["Environment".to_string(), "Team".to_string()]);
+    }
+
+    #[test]
+    fn distinct_tag_values_filters_by_key() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let env_values = repo.distinct_tag_values("Environment").unwrap();
+        assert_eq!(
+            env_values,
+            vec!["production".to_string(), "staging".to_string()]
+        );
+
+        let team_values = repo.distinct_tag_values("Team").unwrap();
+        assert_eq!(team_values, vec!["platform".to_string()]);
+
+        // A nonexistent key returns an empty list, not an error.
+        let missing = repo.distinct_tag_values("NoSuchKey").unwrap();
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn distinct_services_respects_limit_cap() {
+        // Sanity check that the bound LIMIT ? is actually wired up: with
+        // MAX_FILTER_VALUES == 1000 and only 2 distinct services in this
+        // fixture, the cap has no visible effect here, but confirms the
+        // query executes correctly with the bound parameter present and
+        // returns the full (uncapped-in-practice) result.
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let services = repo.distinct_services().unwrap();
+        assert!(services.len() <= MAX_FILTER_VALUES);
+        assert_eq!(services.len(), 2);
     }
 }

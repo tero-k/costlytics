@@ -457,6 +457,29 @@ mod tests {
                 }],
             })
         }
+
+        fn distinct_services(&self) -> Result<Vec<String>, data::queries::summary::QueryError> {
+            Ok(vec!["EC2".to_string(), "S3".to_string()])
+        }
+
+        fn distinct_accounts(&self) -> Result<Vec<String>, data::queries::summary::QueryError> {
+            Ok(vec!["acct-001".to_string()])
+        }
+
+        fn distinct_regions(&self) -> Result<Vec<String>, data::queries::summary::QueryError> {
+            Ok(vec!["us-east-1".to_string()])
+        }
+
+        fn distinct_tag_keys(&self) -> Result<Vec<String>, data::queries::summary::QueryError> {
+            Ok(vec!["Environment".to_string(), "Team".to_string()])
+        }
+
+        fn distinct_tag_values(
+            &self,
+            _key: &str,
+        ) -> Result<Vec<String>, data::queries::summary::QueryError> {
+            Ok(vec!["production".to_string()])
+        }
     }
 
     fn stub_summary() -> CostSummary {
