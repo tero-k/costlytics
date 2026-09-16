@@ -1,3 +1,4 @@
+use crate::queries::predicate::{build_predicate, FilterPredicate};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use domain::cost::{
     BreakdownResult, BreakdownRow, CompareResult, CompareRow, CostSummary, TimeSeriesPoint,
@@ -109,19 +110,24 @@ impl CostRepository for DuckDbCostRepository {
         let start_str = filter.start.format("%Y-%m-%d %H:%M:%S").to_string();
         let end_str = filter.end.format("%Y-%m-%d %H:%M:%S").to_string();
 
+        let predicate = build_predicate(filter);
+
         // Aggregate per currency in DuckDB — never pull raw rows into Rust.
         let sql = format!(
             "SELECT currency, SUM({metric}) AS total, COUNT(*) AS row_count \
              FROM normalized_cost \
-             WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
+             WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){predicate_sql} \
              GROUP BY currency \
              ORDER BY currency",
-            metric = metric_col
+            metric = metric_col,
+            predicate_sql = predicate.sql
         );
 
         let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<&dyn duckdb::ToSql> = vec![&start_str, &end_str];
+        params.extend(predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
         let rows: Vec<(String, f64, i64)> = stmt
-            .query_map(duckdb::params![start_str, end_str], |row| {
+            .query_map(duckdb::params_from_iter(params), |row| {
                 let currency: String = row.get(0)?;
                 let total: f64 = row.get(1)?;
                 let row_count: i64 = row.get(2)?;
@@ -172,7 +178,11 @@ impl CostRepository for DuckDbCostRepository {
         let start_str = filter.start.format("%Y-%m-%d %H:%M:%S").to_string();
         let end_str = filter.end.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let currency = check_single_currency(&conn, &start_str, &end_str)?;
+        let predicate = build_predicate(filter);
+
+        let currency = check_single_currency(&conn, &start_str, &end_str, &predicate)?;
+
+        let limit_val = MAX_TIMESERIES_POINTS as i64;
 
         let points = match grouping {
             None => {
@@ -180,25 +190,26 @@ impl CostRepository for DuckDbCostRepository {
                     "SELECT CAST(date_trunc('{unit}', usage_start) AS VARCHAR) AS period, \
                      SUM({metric}) AS total, COUNT(*) AS row_count \
                      FROM normalized_cost \
-                     WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
+                     WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){predicate_sql} \
                      GROUP BY period \
                      ORDER BY period \
                      LIMIT ?",
                     unit = unit,
-                    metric = metric_col
+                    metric = metric_col,
+                    predicate_sql = predicate.sql
                 );
 
                 let mut stmt = conn.prepare(&sql)?;
+                let mut params: Vec<&dyn duckdb::ToSql> = vec![&start_str, &end_str];
+                params.extend(predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+                params.push(&limit_val);
                 let rows: Vec<(String, f64, i64)> = stmt
-                    .query_map(
-                        duckdb::params![start_str, end_str, MAX_TIMESERIES_POINTS as i64],
-                        |row| {
-                            let period: String = row.get(0)?;
-                            let total: f64 = row.get(1)?;
-                            let row_count: i64 = row.get(2)?;
-                            Ok((period, total, row_count))
-                        },
-                    )?
+                    .query_map(duckdb::params_from_iter(params), |row| {
+                        let period: String = row.get(0)?;
+                        let total: f64 = row.get(1)?;
+                        let row_count: i64 = row.get(2)?;
+                        Ok((period, total, row_count))
+                    })?
                     .collect::<Result<_, _>>()?;
 
                 rows.into_iter()
@@ -218,27 +229,28 @@ impl CostRepository for DuckDbCostRepository {
                     "SELECT CAST(date_trunc('{unit}', usage_start) AS VARCHAR) AS period, \
                      {dim_col} AS grp, SUM({metric}) AS total, COUNT(*) AS row_count \
                      FROM normalized_cost \
-                     WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
+                     WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){predicate_sql} \
                      GROUP BY period, grp \
                      ORDER BY period, grp \
                      LIMIT ?",
                     unit = unit,
                     dim_col = dim_col,
-                    metric = metric_col
+                    metric = metric_col,
+                    predicate_sql = predicate.sql
                 );
 
                 let mut stmt = conn.prepare(&sql)?;
+                let mut params: Vec<&dyn duckdb::ToSql> = vec![&start_str, &end_str];
+                params.extend(predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+                params.push(&limit_val);
                 let rows: Vec<(String, Option<String>, f64, i64)> = stmt
-                    .query_map(
-                        duckdb::params![start_str, end_str, MAX_TIMESERIES_POINTS as i64],
-                        |row| {
-                            let period: String = row.get(0)?;
-                            let grp: Option<String> = row.get(1)?;
-                            let total: f64 = row.get(2)?;
-                            let row_count: i64 = row.get(3)?;
-                            Ok((period, grp, total, row_count))
-                        },
-                    )?
+                    .query_map(duckdb::params_from_iter(params), |row| {
+                        let period: String = row.get(0)?;
+                        let grp: Option<String> = row.get(1)?;
+                        let total: f64 = row.get(2)?;
+                        let row_count: i64 = row.get(3)?;
+                        Ok((period, grp, total, row_count))
+                    })?
                     .collect::<Result<_, _>>()?;
 
                 rows.into_iter()
@@ -271,22 +283,29 @@ impl CostRepository for DuckDbCostRepository {
         let start_str = filter.start.format("%Y-%m-%d %H:%M:%S").to_string();
         let end_str = filter.end.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let currency = check_single_currency(&conn, &start_str, &end_str)?;
+        let predicate = build_predicate(filter);
+
+        let currency = check_single_currency(&conn, &start_str, &end_str, &predicate)?;
 
         let sql = format!(
             "SELECT {dim_col} AS grp, SUM({metric}) AS total, COUNT(*) AS row_count \
              FROM normalized_cost \
-             WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
+             WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){predicate_sql} \
              GROUP BY grp \
              ORDER BY total DESC \
              LIMIT ?",
             dim_col = dim_col,
-            metric = metric_col
+            metric = metric_col,
+            predicate_sql = predicate.sql
         );
 
         let mut stmt = conn.prepare(&sql)?;
+        let limit_val = limit as i64;
+        let mut params: Vec<&dyn duckdb::ToSql> = vec![&start_str, &end_str];
+        params.extend(predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+        params.push(&limit_val);
         let rows: Vec<BreakdownRow> = stmt
-            .query_map(duckdb::params![start_str, end_str, limit as i64], |row| {
+            .query_map(duckdb::params_from_iter(params), |row| {
                 let key: Option<String> = row.get(0)?;
                 let total: f64 = row.get(1)?;
                 let row_count: i64 = row.get(2)?;
@@ -327,9 +346,23 @@ impl CostRepository for DuckDbCostRepository {
         // one; that's not a currency conflict, just an absence of data, so
         // it's exempted from the mismatch check and the other period's
         // (non-empty) currency is used.
-        let current_currency = check_single_currency(&conn, &current_start_str, &current_end_str)?;
-        let previous_currency =
-            check_single_currency(&conn, &previous_start_str, &previous_end_str)?;
+        // compare() does not yet wire in `CostFilter`'s non-date predicates
+        // (Task 3's scope) — pass the empty predicate so these calls remain
+        // scoped identically to the aggregate queries below, which also
+        // don't apply a predicate yet.
+        let empty_predicate = FilterPredicate::default();
+        let current_currency = check_single_currency(
+            &conn,
+            &current_start_str,
+            &current_end_str,
+            &empty_predicate,
+        )?;
+        let previous_currency = check_single_currency(
+            &conn,
+            &previous_start_str,
+            &previous_end_str,
+            &empty_predicate,
+        )?;
         let currency = if current_currency.is_empty() {
             previous_currency
         } else if previous_currency.is_empty() || previous_currency == current_currency {
@@ -523,13 +556,21 @@ fn check_single_currency(
     conn: &duckdb::Connection,
     start_str: &str,
     end_str: &str,
+    predicate: &FilterPredicate,
 ) -> Result<String, QueryError> {
-    let sql = "SELECT DISTINCT currency FROM normalized_cost \
-               WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
-               ORDER BY currency";
-    let mut stmt = conn.prepare(sql)?;
+    let sql = format!(
+        "SELECT DISTINCT currency FROM normalized_cost \
+         WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){predicate_sql} \
+         ORDER BY currency",
+        predicate_sql = predicate.sql
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params: Vec<&dyn duckdb::ToSql> = vec![&start_str, &end_str];
+    params.extend(predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
     let currencies: Vec<String> = stmt
-        .query_map(duckdb::params![start_str, end_str], |row| row.get(0))?
+        .query_map(duckdb::params_from_iter(params), |row| {
+            row.get(0)
+        })?
         .collect::<Result<_, _>>()?;
 
     if currencies.len() > 1 {
@@ -592,7 +633,7 @@ mod tests {
     use chrono::TimeZone;
     use chrono::Utc;
     use domain::cost::CostMetric;
-    use domain::filters::CostFilter;
+    use domain::filters::{CostFilter, TagFilter, TagOperator};
     use duckdb::Connection;
     use std::sync::OnceLock;
 
@@ -646,7 +687,7 @@ mod tests {
             'acct-001', 'Acct Name', 'sub-001', 'Sub Name',
             'AWS', 'Amazon',
             'S3', 'Storage', 'Object Storage',
-            'us-east-1', 'us-east-1a',
+            'us-west-2', 'us-west-2a',
             'bucket-abc', 'my-bucket', 'S3Bucket',
             'Usage', NULL::VARCHAR, 'Recurring', 'S3 usage', 'OnDemand',
             100.0, 'GB',
@@ -1486,5 +1527,200 @@ mod tests {
         let services = repo.distinct_services().unwrap();
         assert!(services.len() <= MAX_FILTER_VALUES);
         assert_eq!(services.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Predicate-filtered summary()/timeseries()/breakdown() tests (Session 5,
+    // Task 2: wiring `predicate::build_predicate` into the aggregate queries).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn summary_filtered_by_service() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        filter.services = vec!["EC2".to_string()];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        assert!(
+            (summary.total - 1034.56).abs() < 1e-6,
+            "expected only EC2 row's total, got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.currency, "USD");
+    }
+
+    #[test]
+    fn summary_filtered_by_nonexistent_service_returns_zero() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        filter.services = vec!["NoSuchService".to_string()];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        assert_eq!(summary.total, 0.0);
+        assert_eq!(summary.row_count, 0);
+    }
+
+    #[test]
+    fn timeseries_filtered_by_service() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        filter.granularity = domain::filters::TimeGranularity::Day;
+        filter.services = vec!["EC2".to_string()];
+
+        let points = repo.timeseries(&filter, None).unwrap().points;
+
+        assert_eq!(points.len(), 1, "only the EC2 period should appear");
+        let p = &points[0];
+        assert_eq!(
+            p.period,
+            Utc.with_ymd_and_hms(2026, 8, 10, 0, 0, 0).unwrap()
+        );
+        assert!((p.total - 1034.56).abs() < 1e-6);
+        assert_eq!(p.row_count, 1);
+    }
+
+    #[test]
+    fn breakdown_filtered_by_region() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        // INLINE_SELECT's EC2 row is us-east-1, S3 row is us-west-2.
+        filter.regions = vec!["us-west-2".to_string()];
+
+        let result = repo
+            .breakdown(&filter, domain::dimensions::Dimension::Service, 10)
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1, "only the us-west-2 row should match");
+        assert_eq!(result.rows[0].key.as_deref(), Some("S3"));
+        assert!((result.rows[0].total - 200.00).abs() < 1e-6);
+    }
+
+    #[test]
+    fn summary_filtered_by_multiple_accounts_or_semantics() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        // TAGGED_SELECT rows use SubAccountId sub-001 (rows 1 and 3) and
+        // sub-002 (row 2). "no-such-account" never matches — this proves the
+        // list filter is OR-within-field: any account in the list matches,
+        // even though the account filter itself is a single field.
+        filter.accounts = vec!["sub-001".to_string(), "no-such-account".to_string()];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        // Rows 1 (1034.56) + 3 (50.00) both have account sub-001.
+        assert!(
+            (summary.total - 1084.56).abs() < 1e-6,
+            "expected sub-001 rows only, got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 2);
+    }
+
+    #[test]
+    fn summary_filtered_by_tag_exists() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        // Only row 1 (acct-001/EC2, 2026-08-10) carries the "Team" tag key.
+        filter.tags = vec![TagFilter {
+            key: "Team".to_string(),
+            operator: TagOperator::Exists,
+            values: vec![],
+        }];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        assert!(
+            (summary.total - 1034.56).abs() < 1e-6,
+            "expected only the row with a Team tag, got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 1);
+    }
+
+    #[test]
+    fn summary_filtered_by_tag_eq() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        // Only row 2 (acct-002/S3) has Environment=staging; row 1 has
+        // Environment=production and row 3 has no Tags at all.
+        filter.tags = vec![TagFilter {
+            key: "Environment".to_string(),
+            operator: TagOperator::Eq,
+            values: vec!["staging".to_string()],
+        }];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        assert!(
+            (summary.total - 200.00).abs() < 1e-6,
+            "expected only the Environment=staging row, got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 1);
+    }
+
+    #[test]
+    fn summary_unfiltered_matches_prior_behavior() {
+        // Regression proof: the same scenario as `summary_amortized_august_2026`
+        // (pre-Session-5), re-run through the new predicate-aware code path
+        // with a default-constructed filter (no predicates) — must produce
+        // the byte-identical old total, proving an empty predicate is a true
+        // no-op.
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let filter = CostFilter::date_range(start, end);
+
+        let summary = repo.summary(&filter).unwrap();
+
+        assert!(
+            (summary.total - 1234.56).abs() < 1e-6,
+            "amortized total mismatch: {}",
+            summary.total
+        );
+        assert_eq!(summary.currency, "USD");
+        assert_eq!(summary.row_count, 2);
+        assert_eq!(summary.metric, CostMetric::Amortized);
     }
 }
