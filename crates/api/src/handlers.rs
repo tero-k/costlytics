@@ -8,7 +8,7 @@ use data::queries::summary::{CostRepository, QueryError};
 use domain::{
     cost::{BreakdownRow, CostMetric, TimeSeriesPoint},
     dimensions::Dimension,
-    filters::{CostFilter, TimeGranularity},
+    filters::{CostFilter, TagFilter, TimeGranularity},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -50,12 +50,49 @@ fn parse_metric(s: &str) -> Option<CostMetric> {
     }
 }
 
+/// The six `CostFilter` predicate fields a client may supply on any
+/// `/cost/*` request, flattened directly into each request struct so the
+/// JSON shape stays a single flat object (see the brief's example body).
+/// All fields are optional and default to empty ("no filter on this
+/// dimension"), matching `CostFilter::date_range`'s own defaults.
+#[derive(Debug, Default, Deserialize)]
+pub struct FilterFields {
+    #[serde(default)]
+    pub accounts: Vec<String>,
+    #[serde(default)]
+    pub services: Vec<String>,
+    #[serde(default)]
+    pub regions: Vec<String>,
+    #[serde(default)]
+    pub charge_categories: Vec<String>,
+    #[serde(default)]
+    pub resource_ids: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<TagFilter>,
+}
+
+impl FilterFields {
+    /// Copies these fields onto a `CostFilter`'s corresponding predicate
+    /// fields (`filter.start`/`end`/`metric`/`granularity` are left
+    /// untouched — this only ever sets the predicate fields).
+    fn apply(&self, filter: &mut CostFilter) {
+        filter.accounts = self.accounts.clone();
+        filter.services = self.services.clone();
+        filter.regions = self.regions.clone();
+        filter.charge_categories = self.charge_categories.clone();
+        filter.resource_ids = self.resource_ids.clone();
+        filter.tags = self.tags.clone();
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SummaryRequest {
     pub source_id: Option<String>,
     pub start: NaiveDate,
     pub end: NaiveDate,
     pub metric: Option<String>,
+    #[serde(flatten)]
+    pub filters: FilterFields,
 }
 
 #[derive(Serialize)]
@@ -169,6 +206,7 @@ fn resolve_common(
     start: NaiveDate,
     end: NaiveDate,
     metric: Option<&str>,
+    filters: &FilterFields,
 ) -> Result<ResolvedRequest, Box<Response>> {
     let (start, end) = validate_date_range(start, end)?;
     let metric = resolve_metric(metric)?;
@@ -176,6 +214,7 @@ fn resolve_common(
 
     let mut filter = CostFilter::date_range(start, end);
     filter.metric = metric;
+    filters.apply(&mut filter);
 
     Ok(ResolvedRequest { repo, filter })
 }
@@ -190,6 +229,7 @@ pub async fn cost_summary(
         body.start,
         body.end,
         body.metric.as_deref(),
+        &body.filters,
     ) {
         Ok(resolved) => resolved,
         Err(resp) => return *resp,
@@ -244,6 +284,8 @@ pub struct TimeseriesRequest {
     pub metric: Option<String>,
     pub granularity: Option<String>,
     pub group_by: Option<String>,
+    #[serde(flatten)]
+    pub filters: FilterFields,
 }
 
 #[derive(Serialize)]
@@ -264,6 +306,7 @@ pub async fn cost_timeseries(
         body.start,
         body.end,
         body.metric.as_deref(),
+        &body.filters,
     ) {
         Ok(resolved) => resolved,
         Err(resp) => return *resp,
@@ -337,6 +380,8 @@ pub struct BreakdownRequest {
     pub metric: Option<String>,
     pub dimension: Option<String>,
     pub limit: Option<usize>,
+    #[serde(flatten)]
+    pub filters: FilterFields,
 }
 
 #[derive(Serialize)]
@@ -357,6 +402,7 @@ pub async fn cost_breakdown(
         body.start,
         body.end,
         body.metric.as_deref(),
+        &body.filters,
     ) {
         Ok(resolved) => resolved,
         Err(resp) => return *resp,
@@ -426,6 +472,15 @@ pub struct CompareRequest {
     pub previous_end: NaiveDate,
     pub metric: Option<String>,
     pub dimension: Option<String>,
+    /// Predicate fields for the *current* period only — `compare()` applies
+    /// each period's own filter to its own aggregate, so `current` and
+    /// `previous` are independent and may differ (see `CostRepository::compare`'s
+    /// doc comment). Defaults to no filter (all fields empty) when absent.
+    #[serde(default)]
+    pub current: FilterFields,
+    /// Predicate fields for the *previous* period only. See `current`.
+    #[serde(default)]
+    pub previous: FilterFields,
 }
 
 #[derive(Serialize)]
@@ -475,8 +530,10 @@ pub async fn cost_compare(
 
     let mut current_filter = CostFilter::date_range(current_start, current_end);
     current_filter.metric = metric;
+    body.current.apply(&mut current_filter);
     let mut previous_filter = CostFilter::date_range(previous_start, previous_end);
     previous_filter.metric = metric;
+    body.previous.apply(&mut previous_filter);
 
     // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
     let result = tokio::task::spawn_blocking(move || {
@@ -861,6 +918,40 @@ mod tests {
         assert_eq!(json["currency"], "USD");
     }
 
+    /// Session 5, Task 3: the request body deserializes correctly with the
+    /// six predicate fields present (`StubRepo` returns fixed data regardless
+    /// of filter contents, so this mainly proves the handler doesn't reject
+    /// an extended body).
+    #[tokio::test]
+    async fn summary_with_service_filter_returns_200() {
+        let app = build_router(make_state());
+        let payload = serde_json::json!({
+            "start": "2026-08-01",
+            "end": "2026-09-01",
+            "metric": "amortized",
+            "services": ["EC2", "S3"],
+            "accounts": [],
+            "regions": ["us-east-1"],
+            "charge_categories": [],
+            "resource_ids": [],
+            "tags": [
+                {"key": "Environment", "operator": "eq", "values": ["production"]}
+            ]
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/summary")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["currency"], "USD");
+    }
+
     #[tokio::test]
     async fn timeseries_valid_request_returns_200() {
         let app = build_router(make_state());
@@ -1021,6 +1112,31 @@ mod tests {
         assert_eq!(json["rows"][0]["key"], "EC2");
         assert_eq!(json["rows"][0]["current"], 42.0);
         assert_eq!(json["rows"][0]["previous"], 40.0);
+    }
+
+    /// The `current`/`previous` nested filter objects deserialize
+    /// independently and don't require matching values on both sides.
+    #[tokio::test]
+    async fn compare_with_per_period_filters_returns_200() {
+        let app = build_router(make_state());
+        let payload = serde_json::json!({
+            "current_start": "2026-08-01",
+            "current_end": "2026-09-01",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-08-01",
+            "metric": "amortized",
+            "dimension": "service",
+            "current": {"services": ["EC2"]},
+            "previous": {"services": ["EC2", "S3"]}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

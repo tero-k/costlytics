@@ -346,22 +346,23 @@ impl CostRepository for DuckDbCostRepository {
         // one; that's not a currency conflict, just an absence of data, so
         // it's exempted from the mismatch check and the other period's
         // (non-empty) currency is used.
-        // compare() does not yet wire in `CostFilter`'s non-date predicates
-        // (Task 3's scope) — pass the empty predicate so these calls remain
-        // scoped identically to the aggregate queries below, which also
-        // don't apply a predicate yet.
-        let empty_predicate = FilterPredicate::default();
+        //
+        // Each period's own predicate (built from its own `CostFilter`) is
+        // applied to that period's check — `current` and `previous` may
+        // carry different filter values, and each must be scoped to its own.
+        let current_predicate = build_predicate(current);
+        let previous_predicate = build_predicate(previous);
         let current_currency = check_single_currency(
             &conn,
             &current_start_str,
             &current_end_str,
-            &empty_predicate,
+            &current_predicate,
         )?;
         let previous_currency = check_single_currency(
             &conn,
             &previous_start_str,
             &previous_end_str,
-            &empty_predicate,
+            &previous_predicate,
         )?;
         let currency = if current_currency.is_empty() {
             previous_currency
@@ -377,29 +378,39 @@ impl CostRepository for DuckDbCostRepository {
         let rows = match dimension {
             None => {
                 let sql = format!(
-                    "SELECT SUM(CASE WHEN usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) THEN {metric} END) AS current_total, \
-                     SUM(CASE WHEN usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) THEN {metric} END) AS previous_total \
+                    "SELECT SUM(CASE WHEN usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){current_predicate_sql} THEN {metric} END) AS current_total, \
+                     SUM(CASE WHEN usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){previous_predicate_sql} THEN {metric} END) AS previous_total \
                      FROM normalized_cost \
-                     WHERE (usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP)) \
-                        OR (usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP))",
-                    metric = metric_col
+                     WHERE (usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){current_predicate_sql}) \
+                        OR (usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){previous_predicate_sql})",
+                    metric = metric_col,
+                    current_predicate_sql = current_predicate.sql,
+                    previous_predicate_sql = previous_predicate.sql,
                 );
 
                 let mut stmt = conn.prepare(&sql)?;
+                let mut params: Vec<&dyn duckdb::ToSql> = Vec::new();
+                // current_total CASE
+                params.push(&current_start_str);
+                params.push(&current_end_str);
+                params.extend(current_predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+                // previous_total CASE
+                params.push(&previous_start_str);
+                params.push(&previous_end_str);
+                params.extend(previous_predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+                // WHERE current clause
+                params.push(&current_start_str);
+                params.push(&current_end_str);
+                params.extend(current_predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+                // WHERE previous clause
+                params.push(&previous_start_str);
+                params.push(&previous_end_str);
+                params.extend(previous_predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+
                 let (current_total, previous_total): (Option<f64>, Option<f64>) = stmt
-                    .query_row(
-                        duckdb::params![
-                            current_start_str,
-                            current_end_str,
-                            previous_start_str,
-                            previous_end_str,
-                            current_start_str,
-                            current_end_str,
-                            previous_start_str,
-                            previous_end_str,
-                        ],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )?;
+                    .query_row(duckdb::params_from_iter(params), |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?;
 
                 let current_total = current_total.unwrap_or(0.0);
                 let previous_total = previous_total.unwrap_or(0.0);
@@ -412,13 +423,13 @@ impl CostRepository for DuckDbCostRepository {
                     "WITH current_agg AS ( \
                         SELECT {dim_col} AS key, SUM({metric}) AS total \
                         FROM normalized_cost \
-                        WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
+                        WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){current_predicate_sql} \
                         GROUP BY key \
                      ), \
                      previous_agg AS ( \
                         SELECT {dim_col} AS key, SUM({metric}) AS total \
                         FROM normalized_cost \
-                        WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
+                        WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP){previous_predicate_sql} \
                         GROUP BY key \
                      ) \
                      SELECT \
@@ -430,26 +441,29 @@ impl CostRepository for DuckDbCostRepository {
                      ORDER BY ABS(COALESCE(c.total, 0) - COALESCE(p.total, 0)) DESC \
                      LIMIT ?",
                     dim_col = dim_col,
-                    metric = metric_col
+                    metric = metric_col,
+                    current_predicate_sql = current_predicate.sql,
+                    previous_predicate_sql = previous_predicate.sql,
                 );
 
                 let mut stmt = conn.prepare(&sql)?;
+                let limit_val = MAX_COMPARE_ROWS as i64;
+                let mut params: Vec<&dyn duckdb::ToSql> = Vec::new();
+                params.push(&current_start_str);
+                params.push(&current_end_str);
+                params.extend(current_predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+                params.push(&previous_start_str);
+                params.push(&previous_end_str);
+                params.extend(previous_predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+                params.push(&limit_val);
+
                 let raw_rows: Vec<(Option<String>, f64, f64)> = stmt
-                    .query_map(
-                        duckdb::params![
-                            current_start_str,
-                            current_end_str,
-                            previous_start_str,
-                            previous_end_str,
-                            MAX_COMPARE_ROWS as i64,
-                        ],
-                        |row| {
-                            let key: Option<String> = row.get(0)?;
-                            let current_total: f64 = row.get(1)?;
-                            let previous_total: f64 = row.get(2)?;
-                            Ok((key, current_total, previous_total))
-                        },
-                    )?
+                    .query_map(duckdb::params_from_iter(params), |row| {
+                        let key: Option<String> = row.get(0)?;
+                        let current_total: f64 = row.get(1)?;
+                        let previous_total: f64 = row.get(2)?;
+                        Ok((key, current_total, previous_total))
+                    })?
                     .collect::<Result<_, _>>()?;
 
                 raw_rows
@@ -1511,6 +1525,55 @@ mod tests {
             }
             other => panic!("expected MultipleCurrencies error, got {other:?}"),
         }
+    }
+
+    /// Session 5, Task 3: `compare()` applies each period's own predicate
+    /// (built from its own `CostFilter`) to that period's aggregate. Filter
+    /// both periods to `services: ["EC2"]` and confirm the S3 row from the
+    /// current period (200.00) is excluded from both the current total and
+    /// the dimensioned breakdown.
+    #[test]
+    fn compare_filtered_by_service() {
+        let (_dir1, _dir2, pool) = build_compare_pool();
+        let repo = DuckDbCostRepository::new(pool);
+
+        let mut current = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        );
+        current.services = vec!["EC2".to_string()];
+        let mut previous = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+        );
+        previous.services = vec!["EC2".to_string()];
+
+        // Non-dimensioned: current total must be EC2-only (1034.56), not
+        // 1234.56 (which would include the S3 row).
+        let result = repo.compare(&current, &previous, None).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert!(
+            (row.current - 1034.56).abs() < 1e-6,
+            "expected EC2-only current total, got {} (S3 leaked in)",
+            row.current
+        );
+        assert!((row.previous - 900.00).abs() < 1e-6, "previous: {}", row.previous);
+
+        // Dimensioned: only the EC2 key should appear at all — S3 must be
+        // excluded entirely, not merely zeroed.
+        let result = repo
+            .compare(&current, &previous, Some(Dimension::Service))
+            .unwrap();
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "S3 should be excluded by the service filter, not just zeroed"
+        );
+        let row = &result.rows[0];
+        assert_eq!(row.key.as_deref(), Some("EC2"));
+        assert!((row.current - 1034.56).abs() < 1e-6);
+        assert!((row.previous - 900.00).abs() < 1e-6);
     }
 
     #[test]
