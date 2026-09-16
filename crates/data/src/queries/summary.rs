@@ -59,17 +59,13 @@ impl CostRepository for DuckDbCostRepository {
             })?
             .collect::<Result<_, _>>()?;
 
-        // Detect multi-currency situation.
+        // Detect multi-currency situation: refuse to silently report a partial total.
         let currencies: Vec<String> = rows.iter().map(|(c, _, _)| c.clone()).collect();
+        if currencies.len() > 1 {
+            return Err(QueryError::MultipleCurrencies(currencies));
+        }
 
-        let multi_currency_warning = if currencies.len() > 1 {
-            Some(currencies.clone())
-        } else {
-            None
-        };
-
-        // Use the first (lexicographically smallest) currency and its total.
-        // If there are no rows, return zeros.
+        // At most one currency remains. If there are no rows, return zeros.
         let (currency, total, row_count) = rows
             .into_iter()
             .next()
@@ -88,7 +84,8 @@ impl CostRepository for DuckDbCostRepository {
             row_count,
             source_format,
             query_ms,
-            multi_currency_warning,
+            start: filter.start,
+            end: filter.end,
         })
     }
 }
@@ -187,7 +184,7 @@ mod tests {
         static ONCE: OnceLock<()> = OnceLock::new();
         ONCE.get_or_init(|| {
             let conn = Connection::open_in_memory().unwrap();
-            conn.execute_batch("INSTALL parquet; LOAD parquet;").unwrap();
+            conn.execute_batch("LOAD parquet;").unwrap();
         });
     }
 
@@ -248,9 +245,10 @@ mod tests {
         );
         assert_eq!(summary.currency, "USD");
         assert_eq!(summary.row_count, 2);
-        assert!(summary.multi_currency_warning.is_none());
         assert_eq!(summary.metric, CostMetric::Amortized);
         assert_eq!(summary.source_format.as_deref(), Some("focus12"));
+        assert_eq!(summary.start, start);
+        assert_eq!(summary.end, end);
     }
 
     #[test]
@@ -291,11 +289,10 @@ mod tests {
         assert_eq!(summary.total, 0.0);
         assert_eq!(summary.row_count, 0);
         assert_eq!(summary.currency, "");
-        assert!(summary.multi_currency_warning.is_none());
     }
 
     #[test]
-    fn summary_multi_currency_warning() {
+    fn summary_multi_currency_returns_error() {
         // Build a two-currency dataset by UNIONing a USD row and a EUR row.
         let two_currency_select = r#"
             SELECT
@@ -343,17 +340,12 @@ mod tests {
         let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
         let filter = CostFilter::date_range(start, end);
 
-        let summary = repo.summary(&filter).unwrap();
-
-        // First alphabetically is EUR
-        assert_eq!(summary.currency, "EUR");
-        assert!(
-            (summary.total - 100.0).abs() < 1e-6,
-            "expected EUR total 100.0, got {}",
-            summary.total
-        );
-        assert!(summary.multi_currency_warning.is_some());
-        let warning = summary.multi_currency_warning.unwrap();
-        assert_eq!(warning, vec!["EUR", "USD"]);
+        let err = repo.summary(&filter).unwrap_err();
+        match err {
+            QueryError::MultipleCurrencies(currencies) => {
+                assert_eq!(currencies, vec!["EUR", "USD"]);
+            }
+            other => panic!("expected MultipleCurrencies error, got {other:?}"),
+        }
     }
 }

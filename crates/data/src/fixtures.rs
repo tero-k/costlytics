@@ -1,6 +1,18 @@
 use duckdb::Connection;
 use std::fs;
 use std::path::Path;
+use thiserror::Error;
+
+/// Errors that can occur while generating the synthetic FOCUS 1.2 fixture dataset.
+#[derive(Debug, Error)]
+pub enum FixtureError {
+    #[error("DuckDB error: {0}")]
+    DuckDb(#[from] duckdb::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+}
 
 /// Known totals for the fixture dataset (used as golden values in tests).
 pub const FIXTURE_AMORTIZED_TOTAL_AUG: f64 = 1234.56;  // August 2026
@@ -25,9 +37,9 @@ pub const FIXTURE_AMORTIZED_TOTAL_COMBINED: f64 =
 ///
 /// The query layer filters on `usage_start` (mapped from `ChargePeriodStart`), not
 /// `BillingPeriodStart`.
-pub fn generate_focus12_fixture(base_dir: &Path) -> anyhow::Result<()> {
+pub fn generate_focus12_fixture(base_dir: &Path) -> Result<(), FixtureError> {
     let conn = Connection::open_in_memory()?;
-    conn.execute_batch("INSTALL parquet; LOAD parquet;")?;
+    conn.execute_batch("LOAD parquet;")?;
 
     generate_august_partition(&conn, base_dir)?;
     generate_september_partition(&conn, base_dir)?;
@@ -41,7 +53,7 @@ pub fn generate_focus12_fixture(base_dir: &Path) -> anyhow::Result<()> {
 //   Row 2: EffectiveCost=200.00,  BilledCost=0.00     (Aug 20)
 // Totals: amortized=1234.56, billed=1100.00
 // ---------------------------------------------------------------------------
-fn generate_august_partition(conn: &Connection, base_dir: &Path) -> anyhow::Result<()> {
+fn generate_august_partition(conn: &Connection, base_dir: &Path) -> Result<(), FixtureError> {
     let dir = base_dir.join("BILLING_PERIOD=2026-08");
     fs::create_dir_all(&dir)?;
     let parquet_path = dir.join("data.parquet");
@@ -128,7 +140,7 @@ fn generate_august_partition(conn: &Connection, base_dir: &Path) -> anyhow::Resu
 // One row: EffectiveCost=200.00  (Sep 5, inside the partial window)
 // Total: amortized=200.00
 // ---------------------------------------------------------------------------
-fn generate_september_partition(conn: &Connection, base_dir: &Path) -> anyhow::Result<()> {
+fn generate_september_partition(conn: &Connection, base_dir: &Path) -> Result<(), FixtureError> {
     let dir = base_dir.join("BILLING_PERIOD=2026-09");
     fs::create_dir_all(&dir)?;
     let parquet_path = dir.join("data.parquet");
@@ -202,7 +214,7 @@ mod tests {
         static ONCE: OnceLock<()> = OnceLock::new();
         ONCE.get_or_init(|| {
             let conn = Connection::open_in_memory().unwrap();
-            conn.execute_batch("INSTALL parquet; LOAD parquet;").unwrap();
+            conn.execute_batch("LOAD parquet;").unwrap();
         });
     }
 

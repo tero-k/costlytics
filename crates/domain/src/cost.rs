@@ -69,8 +69,10 @@ pub struct CostSummary {
     pub row_count: u64,
     pub source_format: Option<String>,
     pub query_ms: u64,
-    /// Populated when more than one currency is present in the result.
-    pub multi_currency_warning: Option<Vec<String>>,
+    /// Inclusive start of the queried window (UTC), echoed from the request filter.
+    pub start: chrono::DateTime<chrono::Utc>,
+    /// Exclusive end of the queried window (UTC), echoed from the request filter.
+    pub end: chrono::DateTime<chrono::Utc>,
 }
 
 #[cfg(test)]

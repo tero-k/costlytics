@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::{NaiveDate, TimeZone, Utc};
+use data::queries::summary::QueryError;
 use domain::{cost::CostMetric, filters::CostFilter};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,13 @@ fn internal_error(msg: impl Into<String>) -> impl IntoResponse {
     )
 }
 
+fn conflict(msg: impl Into<String>) -> impl IntoResponse {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
 pub async fn cost_summary(
     State(state): State<AppState>,
     Json(body): Json<SummaryRequest>,
@@ -122,8 +130,19 @@ pub async fn cost_summary(
     let result = tokio::task::spawn_blocking(move || repo.summary(&filter)).await;
 
     match result {
-        Err(join_err) => internal_error(format!("task panicked: {}", join_err)).into_response(),
-        Ok(Err(query_err)) => internal_error(format!("query error: {}", query_err)).into_response(),
+        Err(join_err) => {
+            tracing::error!(error = %join_err, "cost_summary task panicked");
+            internal_error("internal server error").into_response()
+        }
+        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
+            "multiple currencies present: [{}]; currency filtering is not yet supported",
+            currencies.join(", ")
+        ))
+        .into_response(),
+        Ok(Err(query_err)) => {
+            tracing::error!(error = %query_err, "cost_summary query failed");
+            internal_error("internal server error").into_response()
+        }
         Ok(Ok(summary)) => (StatusCode::OK, Json(summary)).into_response(),
     }
 }
@@ -168,7 +187,8 @@ mod tests {
             row_count: 1,
             source_format: Some("focus12".into()),
             query_ms: 0,
-            multi_currency_warning: None,
+            start: Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
         }
     }
 

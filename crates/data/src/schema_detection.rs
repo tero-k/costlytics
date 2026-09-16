@@ -94,7 +94,7 @@ mod tests {
         static ONCE: OnceLock<()> = OnceLock::new();
         ONCE.get_or_init(|| {
             let conn = Connection::open_in_memory().unwrap();
-            conn.execute_batch("INSTALL parquet; LOAD parquet;").unwrap();
+            conn.execute_batch("LOAD parquet;").unwrap();
         });
     }
 
