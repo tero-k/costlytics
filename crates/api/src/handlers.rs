@@ -177,6 +177,23 @@ mod tests {
         ) -> Result<CostSummary, data::queries::summary::QueryError> {
             Ok(self.summary.clone())
         }
+
+        fn timeseries(
+            &self,
+            _filter: &CostFilter,
+            _grouping: Option<domain::dimensions::Dimension>,
+        ) -> Result<Vec<domain::cost::TimeSeriesPoint>, data::queries::summary::QueryError> {
+            Ok(vec![])
+        }
+
+        fn breakdown(
+            &self,
+            _filter: &CostFilter,
+            _dimension: domain::dimensions::Dimension,
+            _limit: usize,
+        ) -> Result<Vec<domain::cost::BreakdownRow>, data::queries::summary::QueryError> {
+            Ok(vec![])
+        }
     }
 
     fn stub_summary() -> CostSummary {
