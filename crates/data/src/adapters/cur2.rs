@@ -92,26 +92,26 @@ SELECT
     )                                                    AS billed_cost,
     CASE
         WHEN line_item_line_item_type = 'SavingsPlanCoveredUsage'
-            THEN CAST(savings_plan_savings_plan_effective_cost AS DOUBLE)
+            THEN COALESCE(CAST(savings_plan_savings_plan_effective_cost AS DOUBLE), 0)
 
         WHEN line_item_line_item_type = 'SavingsPlanRecurringFee'
-            THEN CAST(savings_plan_total_commitment_to_date AS DOUBLE)
-                 - CAST(savings_plan_used_commitment AS DOUBLE)
+            THEN COALESCE(CAST(savings_plan_total_commitment_to_date AS DOUBLE), 0)
+                 - COALESCE(CAST(savings_plan_used_commitment AS DOUBLE), 0)
 
         WHEN line_item_line_item_type IN ('SavingsPlanNegation', 'SavingsPlanUpfrontFee')
             THEN 0
 
         WHEN line_item_line_item_type = 'DiscountedUsage'
-            THEN CAST(reservation_effective_cost AS DOUBLE)
+            THEN COALESCE(CAST(reservation_effective_cost AS DOUBLE), 0)
 
         WHEN line_item_line_item_type = 'RIFee'
-            THEN CAST(reservation_unused_amortized_upfront_fee_for_billing_period AS DOUBLE)
-                 + CAST(reservation_unused_recurring_fee AS DOUBLE)
+            THEN COALESCE(CAST(reservation_unused_amortized_upfront_fee_for_billing_period AS DOUBLE), 0)
+                 + COALESCE(CAST(reservation_unused_recurring_fee AS DOUBLE), 0)
 
         WHEN line_item_line_item_type = 'Fee' AND reservation_arn IS NOT NULL
             THEN 0
 
-        ELSE CAST(line_item_unblended_cost AS DOUBLE)
+        ELSE COALESCE(CAST(line_item_unblended_cost AS DOUBLE), 0)
     END                                                  AS amortized_cost,
     NULL::DOUBLE                                          AS list_cost,
     NULL::DOUBLE                                          AS contracted_cost,
@@ -312,6 +312,64 @@ mod tests {
         let conn = open_conn();
         let result = register_view(&conn, &[]);
         assert!(result.is_err());
+    }
+
+    /// A `RIFee` row whose `reservation_unused_recurring_fee` is NULL must not
+    /// make `amortized_cost` NULL — the COALESCE guards on the RIFee branch
+    /// should treat the missing operand as 0, not propagate NULL through the
+    /// addition (which would silently vanish from a `SUM()` upstream).
+    #[test]
+    fn cur2_rifee_null_recurring_fee_does_not_null_out_amortized_cost() {
+        let sql = r#"SELECT
+    TIMESTAMP '2026-08-01 00:00:00'    AS bill_billing_period_start_date,
+    TIMESTAMP '2026-09-01 00:00:00'    AS bill_billing_period_end_date,
+    TIMESTAMP '2026-08-15 00:00:00'    AS line_item_usage_start_date,
+    TIMESTAMP '2026-08-16 00:00:00'    AS line_item_usage_end_date,
+    'payer-001'    AS bill_payer_account_id,
+    'Payer Name'   AS bill_payer_account_name,
+    'acct-001'     AS line_item_usage_account_id,
+    'Acct Name'    AS line_item_usage_account_name,
+    'Amazon Elastic Compute Cloud' AS product_product_name,
+    'AmazonEC2'    AS product_servicecode,
+    'us-east-1'    AS product_region_code,
+    'us-east-1a'   AS line_item_availability_zone,
+    'res-rifee-null-recurring' AS line_item_resource_id,
+    'm5.large'     AS product_instance_type,
+    'RIFee'        AS line_item_line_item_type,
+    'RI unused fee, null recurring' AS line_item_line_item_description,
+    1.0            AS line_item_usage_amount,
+    'Hours'        AS pricing_unit,
+    0.0            AS line_item_net_unblended_cost,
+    0.0            AS line_item_unblended_cost,
+    NULL::DOUBLE   AS savings_plan_savings_plan_effective_cost,
+    NULL::DOUBLE   AS savings_plan_total_commitment_to_date,
+    NULL::DOUBLE   AS savings_plan_used_commitment,
+    NULL::DOUBLE   AS reservation_effective_cost,
+    3.0            AS reservation_unused_amortized_upfront_fee_for_billing_period,
+    NULL::DOUBLE   AS reservation_unused_recurring_fee,
+    'USD'          AS line_item_currency_code,
+    NULL::MAP(VARCHAR, VARCHAR) AS resource_tags,
+    NULL::VARCHAR  AS reservation_arn
+  FROM (VALUES (NULL)) AS t(dummy)"#;
+
+        let (_dir, path) = write_parquet(sql);
+        let conn = open_conn();
+        register_view(&conn, &[path]).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT amortized_cost FROM normalized_cost LIMIT 1")
+            .unwrap();
+        let amortized_cost: f64 = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            (amortized_cost - 3.0).abs() < 1e-9,
+            "expected amortized_cost=3.0 (NULL recurring fee treated as 0), got {amortized_cost}"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 ///
 /// These tests exist because the aggregate total assertions in
 /// `crates/data/tests/integration_test.rs` (and in `fixtures.rs`'s own unit
-/// tests) sum over all 11 scenario rows — two compensating formula bugs could
+/// tests) sum over all 12 scenario rows — two compensating formula bugs could
 /// cancel out and still pass those. This file pins individual scenario rows
 /// directly against the `normalized_cost` VIEW.
 ///
@@ -15,7 +15,14 @@ use chrono::Utc;
 use data::adapters::{cur2, focus12};
 use data::discovery::discover_partitions;
 use data::duckdb_pool;
-use data::fixtures::{generate_cur2_fixture, CUR_GOLDEN_TOTAL_AMORTIZED, CUR_GOLDEN_TOTAL_BILLED};
+use data::fixtures::{
+    generate_cur2_fixture, CUR_FEE_PLAIN_AMORTIZED, CUR_FEE_PLAIN_BILLED,
+    CUR_GOLDEN_TOTAL_AMORTIZED, CUR_GOLDEN_TOTAL_BILLED, CUR_RI_DISCOUNTED_USAGE_AMORTIZED,
+    CUR_RI_DISCOUNTED_USAGE_BILLED, CUR_RI_FEE_AMORTIZED, CUR_RI_FEE_BILLED,
+    CUR_SP_COVERED_USAGE_AMORTIZED, CUR_SP_COVERED_USAGE_BILLED, CUR_SP_NEGATION_AMORTIZED,
+    CUR_SP_NEGATION_BILLED, CUR_SP_RECURRING_FEE_AMORTIZED, CUR_SP_RECURRING_FEE_BILLED,
+    CUR_SP_UPFRONT_FEE_AMORTIZED, CUR_SP_UPFRONT_FEE_BILLED,
+};
 use data::object_store::LocalObjectStore;
 use data::object_store::YearMonth;
 use data::queries::summary::{CostRepository, DuckDbCostRepository};
@@ -112,12 +119,12 @@ fn cur2_golden_ri_fee() {
     let (billed, amortized) = query_scenario(&conn, "res-ri-fee");
 
     assert!(
-        (billed - 50.0).abs() < 0.01,
-        "res-ri-fee billed_cost: expected 50.0, got {billed}"
+        (billed - CUR_RI_FEE_BILLED).abs() < 0.01,
+        "res-ri-fee billed_cost: expected {CUR_RI_FEE_BILLED}, got {billed}"
     );
     assert!(
-        (amortized - 5.0).abs() < 0.01,
-        "res-ri-fee amortized_cost: expected 5.0, got {amortized}"
+        (amortized - CUR_RI_FEE_AMORTIZED).abs() < 0.01,
+        "res-ri-fee amortized_cost: expected {CUR_RI_FEE_AMORTIZED}, got {amortized}"
     );
 }
 
@@ -131,12 +138,12 @@ fn cur2_golden_sp_recurring_fee() {
     let (billed, amortized) = query_scenario(&conn, "res-sp-recurring");
 
     assert!(
-        (billed - 100.0).abs() < 0.01,
-        "res-sp-recurring billed_cost: expected 100.0, got {billed}"
+        (billed - CUR_SP_RECURRING_FEE_BILLED).abs() < 0.01,
+        "res-sp-recurring billed_cost: expected {CUR_SP_RECURRING_FEE_BILLED}, got {billed}"
     );
     assert!(
-        (amortized - 40.0).abs() < 0.01,
-        "res-sp-recurring amortized_cost: expected 40.0, got {amortized}"
+        (amortized - CUR_SP_RECURRING_FEE_AMORTIZED).abs() < 0.01,
+        "res-sp-recurring amortized_cost: expected {CUR_SP_RECURRING_FEE_AMORTIZED}, got {amortized}"
     );
 }
 
@@ -150,12 +157,12 @@ fn cur2_golden_sp_negation() {
     let (billed, amortized) = query_scenario(&conn, "res-sp-negation");
 
     assert!(
-        (billed - (-30.0)).abs() < 0.01,
-        "res-sp-negation billed_cost: expected -30.0, got {billed}"
+        (billed - CUR_SP_NEGATION_BILLED).abs() < 0.01,
+        "res-sp-negation billed_cost: expected {CUR_SP_NEGATION_BILLED}, got {billed}"
     );
     assert_eq!(
-        amortized, 0.0,
-        "res-sp-negation amortized_cost: expected exactly 0.0, got {amortized}"
+        amortized, CUR_SP_NEGATION_AMORTIZED,
+        "res-sp-negation amortized_cost: expected exactly {CUR_SP_NEGATION_AMORTIZED}, got {amortized}"
     );
 }
 
@@ -169,12 +176,73 @@ fn cur2_golden_ri_discounted_usage() {
     let (billed, amortized) = query_scenario(&conn, "res-ri-discounted");
 
     assert_eq!(
-        billed, 0.0,
-        "res-ri-discounted billed_cost: expected exactly 0.0, got {billed}"
+        billed, CUR_RI_DISCOUNTED_USAGE_BILLED,
+        "res-ri-discounted billed_cost: expected exactly {CUR_RI_DISCOUNTED_USAGE_BILLED}, got {billed}"
     );
     assert!(
-        (amortized - 8.0).abs() < 0.01,
-        "res-ri-discounted amortized_cost: expected 8.0, got {amortized}"
+        (amortized - CUR_RI_DISCOUNTED_USAGE_AMORTIZED).abs() < 0.01,
+        "res-ri-discounted amortized_cost: expected {CUR_RI_DISCOUNTED_USAGE_AMORTIZED}, got {amortized}"
+    );
+}
+
+/// SP Covered Usage row (`res-sp-covered`): proves the
+/// `savings_plan_savings_plan_effective_cost` passthrough, and that billed_cost
+/// is zeroed (net_unblended_cost is 0.0 for SP-covered usage rows).
+#[test]
+fn cur2_golden_sp_covered_usage() {
+    let (_dir, aug_path) = setup_cur2_fixture();
+    let conn = open_conn_with_cur2_view(&[aug_path]);
+
+    let (billed, amortized) = query_scenario(&conn, "res-sp-covered");
+
+    assert!(
+        (billed - CUR_SP_COVERED_USAGE_BILLED).abs() < 0.01,
+        "res-sp-covered billed_cost: expected {CUR_SP_COVERED_USAGE_BILLED}, got {billed}"
+    );
+    assert!(
+        (amortized - CUR_SP_COVERED_USAGE_AMORTIZED).abs() < 0.01,
+        "res-sp-covered amortized_cost: expected {CUR_SP_COVERED_USAGE_AMORTIZED}, got {amortized}"
+    );
+}
+
+/// SP Upfront Fee row (`res-sp-upfront`): proves the zero-out branch for
+/// SavingsPlanUpfrontFee — billed_cost keeps the raw fee, amortized_cost is
+/// zeroed because the upfront fee is spread via SavingsPlanCoveredUsage rows.
+#[test]
+fn cur2_golden_sp_upfront_fee() {
+    let (_dir, aug_path) = setup_cur2_fixture();
+    let conn = open_conn_with_cur2_view(&[aug_path]);
+
+    let (billed, amortized) = query_scenario(&conn, "res-sp-upfront");
+
+    assert!(
+        (billed - CUR_SP_UPFRONT_FEE_BILLED).abs() < 0.01,
+        "res-sp-upfront billed_cost: expected {CUR_SP_UPFRONT_FEE_BILLED}, got {billed}"
+    );
+    assert_eq!(
+        amortized, CUR_SP_UPFRONT_FEE_AMORTIZED,
+        "res-sp-upfront amortized_cost: expected exactly {CUR_SP_UPFRONT_FEE_AMORTIZED}, got {amortized}"
+    );
+}
+
+/// Plain `Fee` row with `reservation_arn = NULL` (`res-fee-plain`): proves the
+/// compound `Fee AND reservation_arn IS NOT NULL` condition does NOT zero out
+/// an ordinary non-reservation fee (e.g. AWS Support) — it must fall through
+/// to ELSE and keep its unblended cost.
+#[test]
+fn cur2_golden_fee_without_reservation() {
+    let (_dir, aug_path) = setup_cur2_fixture();
+    let conn = open_conn_with_cur2_view(&[aug_path]);
+
+    let (billed, amortized) = query_scenario(&conn, "res-fee-plain");
+
+    assert!(
+        (billed - CUR_FEE_PLAIN_BILLED).abs() < 0.01,
+        "res-fee-plain billed_cost: expected {CUR_FEE_PLAIN_BILLED}, got {billed}"
+    );
+    assert!(
+        (amortized - CUR_FEE_PLAIN_AMORTIZED).abs() < 0.01,
+        "res-fee-plain amortized_cost: expected {CUR_FEE_PLAIN_AMORTIZED} (ELSE branch, not zeroed), got {amortized}"
     );
 }
 

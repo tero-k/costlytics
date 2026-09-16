@@ -205,8 +205,10 @@ fn generate_september_partition(conn: &Connection, base_dir: &Path) -> Result<()
 }
 
 // ---------------------------------------------------------------------------
-// CUR 2.0 golden fixture: 11 scenario rows exercising every branch of the
-// `amortized_cost` CASE expression in `adapters::cur2::register_view`.
+// CUR 2.0 golden fixture: 12 scenario rows exercising every branch of the
+// `amortized_cost` CASE expression in `adapters::cur2::register_view`,
+// including the compound `Fee AND reservation_arn IS NOT NULL` condition
+// (both the reservation-fee and plain-fee sides of that branch).
 // See `.git/sdd/task-cur2-2-brief.md` for the source-of-truth table.
 // ---------------------------------------------------------------------------
 
@@ -245,10 +247,17 @@ pub const CUR_SP_UPFRONT_FEE_AMORTIZED: f64 = 0.0;
 pub const CUR_FEE_WITH_RESERVATION_BILLED: f64 = 40.0;
 pub const CUR_FEE_WITH_RESERVATION_AMORTIZED: f64 = 0.0;
 
-/// Sum of all 11 scenarios' billed_cost.
-pub const CUR_GOLDEN_TOTAL_BILLED: f64 = 245.0;
-/// Sum of all 11 scenarios' amortized_cost.
-pub const CUR_GOLDEN_TOTAL_AMORTIZED: f64 = 135.0;
+/// Plain `Fee` line item with `reservation_arn = NULL` (e.g. an ordinary AWS
+/// support/service fee, not a reservation purchase). Proves the compound
+/// `Fee AND reservation_arn IS NOT NULL` branch condition: this row must fall
+/// through to ELSE and keep its unblended cost rather than being zeroed out.
+pub const CUR_FEE_PLAIN_BILLED: f64 = 10.0;
+pub const CUR_FEE_PLAIN_AMORTIZED: f64 = 10.0;
+
+/// Sum of all 12 scenarios' billed_cost.
+pub const CUR_GOLDEN_TOTAL_BILLED: f64 = 255.0;
+/// Sum of all 12 scenarios' amortized_cost.
+pub const CUR_GOLDEN_TOTAL_AMORTIZED: f64 = 145.0;
 
 /// Generate a synthetic CUR 2.0 Parquet dataset covering every branch of the
 /// `amortized_cost` CASE expression in `adapters::cur2::register_view`.
@@ -259,12 +268,12 @@ pub const CUR_GOLDEN_TOTAL_AMORTIZED: f64 = 135.0;
 /// {base_dir}/BILLING_PERIOD=2026-08/Manifest.json
 /// ```
 ///
-/// Contains 11 rows (one per scenario), each with a distinct
+/// Contains 12 rows (one per scenario), each with a distinct
 /// `line_item_resource_id` so tests can filter individual scenarios.
 ///
 /// # Totals
-/// - `CUR_GOLDEN_TOTAL_BILLED` (245.0) summed over `billed_cost`.
-/// - `CUR_GOLDEN_TOTAL_AMORTIZED` (135.0) summed over `amortized_cost`.
+/// - `CUR_GOLDEN_TOTAL_BILLED` (255.0) summed over `billed_cost`.
+/// - `CUR_GOLDEN_TOTAL_AMORTIZED` (145.0) summed over `amortized_cost`.
 pub fn generate_cur2_fixture(base_dir: &Path) -> Result<(), FixtureError> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("LOAD parquet;")?;
@@ -296,7 +305,8 @@ pub fn generate_cur2_fixture(base_dir: &Path) -> Result<(), FixtureError> {
                 ('res-sp-recurring',  'SavingsPlanRecurringFee', 'SP recurring fee',     100.0,  100.0,  0.0, 100.0, 60.0,  0.0, 0.0, 0.0, NULL),
                 ('res-sp-negation',   'SavingsPlanNegation',     'SP negation',          -30.0,  -30.0,  0.0,  0.0,   0.0,  0.0, 0.0, 0.0, NULL),
                 ('res-sp-upfront',    'SavingsPlanUpfrontFee',   'SP upfront fee',        25.0,   25.0,  0.0,  0.0,   0.0,  0.0, 0.0, 0.0, NULL),
-                ('res-fee-reservation','Fee',                    'Reservation fee',       40.0,   40.0,  0.0,  0.0,   0.0,  0.0, 0.0, 0.0, 'arn:aws:ec2:us-east-1:123456789012:reserved-instances/abc123')
+                ('res-fee-reservation','Fee',                    'Reservation fee',       40.0,   40.0,  0.0,  0.0,   0.0,  0.0, 0.0, 0.0, 'arn:aws:ec2:us-east-1:123456789012:reserved-instances/abc123'),
+                ('res-fee-plain',      'Fee',                    'AWS Support fee',       10.0,   10.0,  0.0,  0.0,   0.0,  0.0, 0.0, 0.0, NULL)
             ) AS t(
                 line_item_resource_id, line_item_line_item_type, line_item_line_item_description,
                 line_item_net_unblended_cost, line_item_unblended_cost,
@@ -616,7 +626,8 @@ mod tests {
             + CUR_SP_RECURRING_FEE_BILLED
             + CUR_SP_NEGATION_BILLED
             + CUR_SP_UPFRONT_FEE_BILLED
-            + CUR_FEE_WITH_RESERVATION_BILLED;
+            + CUR_FEE_WITH_RESERVATION_BILLED
+            + CUR_FEE_PLAIN_BILLED;
         let amortized_sum = CUR_ON_DEMAND_USAGE_AMORTIZED
             + CUR_CREDIT_AMORTIZED
             + CUR_REFUND_AMORTIZED
@@ -627,7 +638,8 @@ mod tests {
             + CUR_SP_RECURRING_FEE_AMORTIZED
             + CUR_SP_NEGATION_AMORTIZED
             + CUR_SP_UPFRONT_FEE_AMORTIZED
-            + CUR_FEE_WITH_RESERVATION_AMORTIZED;
+            + CUR_FEE_WITH_RESERVATION_AMORTIZED
+            + CUR_FEE_PLAIN_AMORTIZED;
         assert!(
             (billed_sum - CUR_GOLDEN_TOTAL_BILLED).abs() < 1e-9,
             "billed sum mismatch: {} vs {}",
@@ -669,7 +681,7 @@ mod tests {
             .next()
             .unwrap()
             .unwrap();
-        assert_eq!(count, 11, "CUR 2.0 fixture should have 11 rows");
+        assert_eq!(count, 12, "CUR 2.0 fixture should have 12 rows");
     }
 
     #[test]
