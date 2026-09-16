@@ -75,6 +75,28 @@ pub struct CostSummary {
     pub end: chrono::DateTime<chrono::Utc>,
 }
 
+/// One point in a cost-over-time series.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TimeSeriesPoint {
+    /// Start of this period (UTC), truncated to the requested granularity.
+    pub period: chrono::DateTime<chrono::Utc>,
+    /// Optional grouping-dimension value for this point (e.g. a service name),
+    /// present only when `timeseries()` was called with `grouping: Some(_)`.
+    pub group: Option<String>,
+    pub total: f64,
+    pub row_count: u64,
+}
+
+/// One row in a dimension breakdown (e.g. "cost by service").
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BreakdownRow {
+    /// The dimension's value for this row (e.g. a service name, account id).
+    /// `None` represents rows where the canonical column was NULL in the source data.
+    pub key: Option<String>,
+    pub total: f64,
+    pub row_count: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,10 @@
 use thiserror::Error;
 
+use crate::cost::{
+    COL_ACCOUNT_ID, COL_AVAILABILITY_ZONE, COL_CHARGE_CATEGORY, COL_PRICING_CATEGORY,
+    COL_REGION, COL_RESOURCE_ID, COL_SERVICE_NAME,
+};
+
 /// Grouping dimensions supported across all dashboards.
 /// Maps to a fixed SQL identifier in normalized_cost — never accepts raw column names from HTTP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -23,13 +28,13 @@ impl Dimension {
     /// Returns the canonical SQL column name for GROUP BY / SELECT.
     pub fn sql_column(&self) -> &'static str {
         match self {
-            Dimension::Service => "service_name",
-            Dimension::Account => "account_id",
-            Dimension::Region => "region",
-            Dimension::AvailabilityZone => "availability_zone",
-            Dimension::ChargeCategory => "charge_category",
-            Dimension::PricingCategory => "pricing_category",
-            Dimension::Resource => "resource_id",
+            Dimension::Service => COL_SERVICE_NAME,
+            Dimension::Account => COL_ACCOUNT_ID,
+            Dimension::Region => COL_REGION,
+            Dimension::AvailabilityZone => COL_AVAILABILITY_ZONE,
+            Dimension::ChargeCategory => COL_CHARGE_CATEGORY,
+            Dimension::PricingCategory => COL_PRICING_CATEGORY,
+            Dimension::Resource => COL_RESOURCE_ID,
         }
     }
 }
