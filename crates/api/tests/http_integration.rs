@@ -191,3 +191,83 @@ async fn http_timeseries_matches_fixture_total() {
         json
     );
 }
+
+/// End-to-end HTTP integration test for the filter-value lookup and
+/// `compare` endpoints (Session 4, Tasks 1-3): proves that
+/// `GET /api/v1/filter-values/services` and `POST /api/v1/cost/compare`
+/// over real HTTP, sourced from a FOCUS 1.2 Parquet fixture discovered and
+/// registered through the full `build_app` startup path, return correct
+/// results.
+#[tokio::test]
+async fn http_filter_values_and_compare_over_real_http() {
+    let dir = tempfile::tempdir().unwrap();
+    generate_focus12_fixture(dir.path()).unwrap();
+
+    let config = AppConfig {
+        server: ServerConfig::default(),
+        sources: vec![DataSource {
+            id: "test-source".into(),
+            name: "Test fixture source".into(),
+            s3_uri: dir.path().to_str().unwrap().to_string(),
+            source_type: SourceType::Focus12,
+            aws_region: None,
+            aws_profile: None,
+            role_arn: None,
+        }],
+    };
+
+    let app = build_app(config).expect("build_app should succeed");
+
+    // GET /api/v1/filter-values/services
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/filter-values/services")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let values = json["values"].as_array().expect("values must be an array");
+    let names: Vec<&str> = values.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        names.contains(&"EC2"),
+        "expected 'EC2' among filter values, got {:?}",
+        names
+    );
+
+    // POST /api/v1/cost/compare: current period covers the fixture's real
+    // August 2026 data, previous period has no matching rows.
+    let payload = serde_json::json!({
+        "current_start": "2026-08-01",
+        "current_end": "2026-09-01",
+        "previous_start": "2026-01-01",
+        "previous_end": "2026-02-01",
+        "metric": "amortized"
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/cost/compare")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["currency"], "USD");
+
+    let row = &json["rows"][0];
+    let current = row["current"].as_f64().expect("current must be a number");
+    assert!(
+        (current - FIXTURE_AMORTIZED_TOTAL_AUG).abs() < 0.01,
+        "expected current ~{}, got {} (full response: {})",
+        FIXTURE_AMORTIZED_TOTAL_AUG,
+        current,
+        json
+    );
+    assert_eq!(row["previous"], serde_json::json!(0.0));
+    assert_eq!(row["percentage_change"], serde_json::Value::Null);
+}

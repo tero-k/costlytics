@@ -321,17 +321,25 @@ impl CostRepository for DuckDbCostRepository {
 
         // Check single-currency for each period independently, then confirm
         // the two periods agree with each other — otherwise the comparison
-        // would silently mix currencies.
+        // would silently mix currencies. A period with zero matching rows
+        // (e.g. a synthetic "no data yet" previous period, or a genuinely
+        // empty window) reports an empty currency string rather than a real
+        // one; that's not a currency conflict, just an absence of data, so
+        // it's exempted from the mismatch check and the other period's
+        // (non-empty) currency is used.
         let current_currency = check_single_currency(&conn, &current_start_str, &current_end_str)?;
         let previous_currency =
             check_single_currency(&conn, &previous_start_str, &previous_end_str)?;
-        if current_currency != previous_currency {
+        let currency = if current_currency.is_empty() {
+            previous_currency
+        } else if previous_currency.is_empty() || previous_currency == current_currency {
+            current_currency
+        } else {
             return Err(QueryError::MultipleCurrencies(vec![
                 previous_currency,
                 current_currency,
             ]));
-        }
-        let currency = current_currency;
+        };
 
         let rows = match dimension {
             None => {
@@ -1316,6 +1324,36 @@ mod tests {
             .expect("S3 row present");
         assert_eq!(s3.previous, 0.0);
         assert_eq!(s3.percentage_change, None);
+    }
+
+    /// A previous period with zero matching rows (no data at all, not just
+    /// a zero total for one dimension key) must not be mistaken for a
+    /// currency conflict: `check_single_currency` returns `""` for an empty
+    /// result set, which is an absence of data, not a second currency.
+    #[test]
+    fn compare_empty_previous_period_does_not_error() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let current = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        );
+        // January 2026: no rows in the fixture at all.
+        let previous = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap(),
+        );
+
+        let result = repo.compare(&current, &previous, None).unwrap();
+        assert_eq!(result.currency, "USD");
+        assert_eq!(result.rows.len(), 1);
+
+        let row = &result.rows[0];
+        assert_eq!(row.previous, 0.0);
+        assert_eq!(row.percentage_change, None);
+        assert!((row.current - 1234.56).abs() < 1e-6);
     }
 
     #[test]
