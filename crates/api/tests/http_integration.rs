@@ -131,3 +131,63 @@ async fn http_cost_summary_matches_cur2_fixture_total_billed() {
         total
     );
 }
+
+/// End-to-end HTTP integration test for the Cost Explorer `timeseries`
+/// endpoint: proves that `POST /api/v1/cost/timeseries` over real HTTP,
+/// sourced from a FOCUS 1.2 Parquet fixture discovered and registered
+/// through the full `build_app` startup path, returns the correct monthly
+/// ungrouped total for August 2026.
+#[tokio::test]
+async fn http_timeseries_matches_fixture_total() {
+    let dir = tempfile::tempdir().unwrap();
+    generate_focus12_fixture(dir.path()).unwrap();
+
+    let config = AppConfig {
+        server: ServerConfig::default(),
+        sources: vec![DataSource {
+            id: "test-source".into(),
+            name: "Test fixture source".into(),
+            s3_uri: dir.path().to_str().unwrap().to_string(),
+            source_type: SourceType::Focus12,
+            aws_region: None,
+            aws_profile: None,
+            role_arn: None,
+        }],
+    };
+
+    let app = build_app(config).expect("build_app should succeed");
+
+    let payload = serde_json::json!({
+        "start": "2026-08-01",
+        "end": "2026-09-01",
+        "metric": "amortized",
+        "granularity": "month"
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/cost/timeseries")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["currency"], "USD");
+    let series = json["series"].as_array().expect("series must be an array");
+    assert_eq!(series.len(), 1, "expected exactly one monthly point");
+
+    let total = series[0]["total"]
+        .as_f64()
+        .expect("total must be a number");
+    assert!(
+        (total - FIXTURE_AMORTIZED_TOTAL_AUG).abs() < 0.01,
+        "expected total ~{}, got {} (full response: {})",
+        FIXTURE_AMORTIZED_TOTAL_AUG,
+        total,
+        json
+    );
+}
