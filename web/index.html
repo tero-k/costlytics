@@ -31,6 +31,21 @@
       </header>
       <main>
         <div id="overview"></div>
+        <section class="chart-section">
+          <div class="chart-header">
+            <h2>Cost trend</h2>
+            <label class="control">
+              <span>Granularity</span>
+              <select id="granularity-select">
+                <option value="auto" selected>Auto</option>
+                <option value="day">Day</option>
+                <option value="month">Month</option>
+                <option value="year">Year</option>
+              </select>
+            </label>
+          </div>
+          <div class="chart-area" id="trend-chart"></div>
+        </section>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>

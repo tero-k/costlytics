@@ -149,11 +149,55 @@ main {
   color: var(--color-success);
 }
 
+.chart-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.chart-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing);
+}
+
+.chart-header h2 {
+  font-size: 1.1rem;
+  margin: 0;
+}
+
 .chart-area {
   width: 100%;
   min-height: 360px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
+  padding: var(--spacing);
+  position: relative;
+}
+
+.chart-area .chart-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+  text-align: center;
+  padding: var(--spacing);
+}
+
+.chart-area .chart-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-danger);
+  font-size: 0.95rem;
+  text-align: center;
   padding: var(--spacing);
 }
