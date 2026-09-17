@@ -7,3 +7,9 @@ id = "local-focus12"
 name = "Local FOCUS 1.2 fixture"
 s3_uri = "fixtures/focus12"
 source_type = "focus12"
+
+[[sources]]
+id = "local-cur2"
+name = "Local CUR 2.0 fixture"
+s3_uri = "fixtures/cur2"
+source_type = "cur2"

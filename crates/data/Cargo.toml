@@ -3,6 +3,10 @@ name = "data"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "generate-fixtures"
+path = "src/bin/generate_fixtures.rs"
+
 [dependencies]
 domain = { path = "../domain" }
 duckdb = { version = "1", features = ["bundled", "r2d2"] }
