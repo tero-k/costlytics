@@ -18,6 +18,18 @@ use crate::state::AppState;
 /// Maximum allowable query date range, in days (~5 years).
 const MAX_DATE_RANGE_DAYS: i64 = 5 * 366;
 
+/// Maximum number of values allowed in any single predicate list field
+/// (`accounts`/`services`/`regions`/`charge_categories`/`resource_ids`), or
+/// in the total `tags` vec, on any `/cost/*` request. Reuses
+/// `MAX_FILTER_VALUES`'s cardinality/rationale from the `data` crate: the
+/// `filter-values` lookup endpoints can never return more than that many
+/// distinct values, so no legitimate client needs a longer predicate list.
+/// Enforced here, at the request-validation layer, rather than inside
+/// `data::queries::predicate` — that keeps the predicate builder a simple,
+/// policy-free translator and matches how `MAX_DATE_RANGE_DAYS` and
+/// `breakdown`'s `limit` cap are already validated in this file.
+const MAX_PREDICATE_VALUES: usize = 1000;
+
 // ---------------------------------------------------------------------------
 // Health check
 // ---------------------------------------------------------------------------
@@ -55,7 +67,7 @@ fn parse_metric(s: &str) -> Option<CostMetric> {
 /// JSON shape stays a single flat object (see the brief's example body).
 /// All fields are optional and default to empty ("no filter on this
 /// dimension"), matching `CostFilter::date_range`'s own defaults.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct FilterFields {
     #[serde(default)]
     pub accounts: Vec<String>,
@@ -160,6 +172,34 @@ fn validate_date_range(
     Ok((start, end))
 }
 
+/// Validates that no single predicate list field, nor the total `tags`
+/// vec, on `fields` exceeds [`MAX_PREDICATE_VALUES`]. `label` identifies
+/// which side of the request `fields` came from (e.g. `""` for the flat
+/// `/cost/summary`-style requests, or `"current."`/`"previous."` for
+/// `compare`'s nested fields) so the 400 body names the offending field
+/// precisely.
+fn validate_filter_fields(fields: &FilterFields, label: &str) -> Result<(), Box<Response>> {
+    let checks: [(&str, usize); 6] = [
+        ("accounts", fields.accounts.len()),
+        ("services", fields.services.len()),
+        ("regions", fields.regions.len()),
+        ("charge_categories", fields.charge_categories.len()),
+        ("resource_ids", fields.resource_ids.len()),
+        ("tags", fields.tags.len()),
+    ];
+    for (name, len) in checks {
+        if len > MAX_PREDICATE_VALUES {
+            return Err(Box::new(
+                bad_request(format!(
+                    "{label}{name} must not contain more than {MAX_PREDICATE_VALUES} values"
+                ))
+                .into_response(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parses the optional `metric` request field, defaulting to
 /// [`CostMetric::default`] when absent.
 fn resolve_metric(metric: Option<&str>) -> Result<CostMetric, Box<Response>> {
@@ -211,6 +251,7 @@ fn resolve_common(
     let (start, end) = validate_date_range(start, end)?;
     let metric = resolve_metric(metric)?;
     let repo = resolve_source(state, source_id)?;
+    validate_filter_fields(filters, "")?;
 
     let mut filter = CostFilter::date_range(start, end);
     filter.metric = metric;
@@ -463,6 +504,15 @@ pub async fn cost_breakdown(
 // POST /api/v1/cost/compare
 // ---------------------------------------------------------------------------
 
+/// `current`/`previous` are separate, independently-deserialized
+/// `FilterFields` (rather than a single flat set of predicate fields shared
+/// with the other `/cost/*` requests) *specifically* because the two
+/// periods being compared can legitimately be scoped differently — this is
+/// a deliberate shape asymmetry, not an oversight. See `CompareResponse`'s
+/// `current_filters`/`previous_filters` for how the response makes the
+/// effective filters on each side visible, so an accidentally-omitted
+/// `previous` (which silently defaults to "no filter") is easy to spot
+/// rather than producing a silently-wrong comparison.
 #[derive(Deserialize)]
 pub struct CompareRequest {
     pub source_id: Option<String>,
@@ -489,6 +539,18 @@ pub struct CompareResponse {
     pub currency: String,
     pub dimension: Option<Dimension>,
     pub rows: Vec<domain::cost::CompareRow>,
+    /// The predicate fields actually applied to the *current* period,
+    /// echoed back exactly as parsed from the request (including
+    /// `#[serde(default)]`-filled-in empty defaults when the client omitted
+    /// `current` entirely). Makes it immediately visible in the response
+    /// when `current`/`previous` were scoped asymmetrically — including the
+    /// common "forgot to set previous" mistake, which would otherwise
+    /// silently compare a filtered current period against an unfiltered
+    /// previous one.
+    pub current_filters: FilterFields,
+    /// The predicate fields actually applied to the *previous* period. See
+    /// `current_filters`.
+    pub previous_filters: FilterFields,
 }
 
 pub async fn cost_compare(
@@ -518,6 +580,13 @@ pub async fn cost_compare(
         Err(resp) => return *resp,
     };
 
+    if let Err(resp) = validate_filter_fields(&body.current, "current.") {
+        return *resp;
+    }
+    if let Err(resp) = validate_filter_fields(&body.previous, "previous.") {
+        return *resp;
+    }
+
     // Parse dimension (optional — unlike breakdown, compare without one is a
     // valid, meaningful single aggregate row)
     let dimension = match body.dimension {
@@ -527,6 +596,12 @@ pub async fn cost_compare(
         },
         None => None,
     };
+
+    // Cloned before the filters are consumed below, so the effective
+    // filters can be echoed back on the response (see `CompareResponse`'s
+    // `current_filters`/`previous_filters` doc comment).
+    let current_filters = body.current.clone();
+    let previous_filters = body.previous.clone();
 
     let mut current_filter = CostFilter::date_range(current_start, current_end);
     current_filter.metric = metric;
@@ -562,6 +637,8 @@ pub async fn cost_compare(
                 currency: result.currency,
                 dimension,
                 rows: result.rows,
+                current_filters,
+                previous_filters,
             }),
         )
             .into_response(),
@@ -952,6 +1029,54 @@ mod tests {
         assert_eq!(json["currency"], "USD");
     }
 
+    /// A predicate list field longer than `MAX_PREDICATE_VALUES` is rejected
+    /// with 400 rather than being handed to the query engine unbounded.
+    #[tokio::test]
+    async fn summary_with_oversized_service_list_returns_400() {
+        let app = build_router(make_state());
+        let services: Vec<String> = (0..(MAX_PREDICATE_VALUES + 1))
+            .map(|i| format!("svc-{i}"))
+            .collect();
+        let payload = serde_json::json!({
+            "start": "2026-08-01",
+            "end": "2026-09-01",
+            "services": services,
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/summary")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `compare`'s per-period oversized-list check applies independently to
+    /// `previous` too, not just `current`.
+    #[tokio::test]
+    async fn compare_with_oversized_previous_account_list_returns_400() {
+        let app = build_router(make_state());
+        let accounts: Vec<String> = (0..(MAX_PREDICATE_VALUES + 1))
+            .map(|i| format!("acct-{i}"))
+            .collect();
+        let payload = serde_json::json!({
+            "current_start": "2026-08-01",
+            "current_end": "2026-09-01",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-08-01",
+            "previous": {"accounts": accounts},
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn timeseries_valid_request_returns_200() {
         let app = build_router(make_state());
@@ -1137,6 +1262,46 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["current_filters"]["services"], serde_json::json!(["EC2"]));
+        assert_eq!(
+            json["previous_filters"]["services"],
+            serde_json::json!(["EC2", "S3"])
+        );
+    }
+
+    /// When a client omits `previous` entirely, the echoed `previous_filters`
+    /// must show the empty defaults that were actually applied — making the
+    /// "forgot to set previous" footgun self-diagnosing in the response
+    /// rather than silently comparing a filtered current period against an
+    /// unfiltered previous one.
+    #[tokio::test]
+    async fn compare_with_omitted_previous_echoes_empty_defaults() {
+        let app = build_router(make_state());
+        let payload = serde_json::json!({
+            "current_start": "2026-08-01",
+            "current_end": "2026-09-01",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-08-01",
+            "current": {"services": ["EC2"]}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/cost/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["current_filters"]["services"], serde_json::json!(["EC2"]));
+        assert_eq!(json["previous_filters"]["services"], serde_json::json!([]));
+        assert_eq!(json["previous_filters"]["accounts"], serde_json::json!([]));
+        assert_eq!(json["previous_filters"]["tags"], serde_json::json!([]));
     }
 
     #[tokio::test]

@@ -1576,6 +1576,58 @@ mod tests {
         assert!((row.previous - 900.00).abs() < 1e-6);
     }
 
+    /// Proves `compare()`'s current/previous predicates are not shared or
+    /// swapped: current (August, `INLINE_SELECT`) is filtered to EC2 only,
+    /// previous (July, `PREVIOUS_PERIOD_SELECT`, which is EC2-only data) is
+    /// filtered to S3 only — deliberately *different* filters that would
+    /// each match different fixture data. If the implementation
+    /// accidentally built one shared predicate (e.g. always using
+    /// `current`'s, or swapping the two), previous would incorrectly pick
+    /// up the EC2 July data (900.00) instead of correctly returning 0.0 (no
+    /// S3 rows exist in `PREVIOUS_PERIOD_SELECT` at all), and/or current
+    /// would incorrectly be scoped by S3 instead of EC2.
+    #[test]
+    fn compare_with_genuinely_different_per_period_filters() {
+        let (_dir1, _dir2, pool) = build_compare_pool();
+        let repo = DuckDbCostRepository::new(pool);
+
+        let mut current = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        );
+        current.services = vec!["EC2".to_string()];
+        let mut previous = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+        );
+        previous.services = vec!["S3".to_string()];
+
+        let result = repo.compare(&current, &previous, None).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+
+        // current, EC2-filtered against August data: EC2-only total.
+        assert!(
+            (row.current - 1034.56).abs() < 1e-6,
+            "current should be the EC2-filtered August total (1034.56); got {} \
+             (a swapped/shared predicate would instead show 0.0 — S3 doesn't \
+             appear in August's fixture data used with a July filter, or some \
+             other mismatched value)",
+            row.current
+        );
+        // previous, S3-filtered against July data that is entirely EC2 rows:
+        // must be 0.0, not the EC2 July total (900.00) a swapped/shared
+        // predicate would wrongly produce.
+        assert_eq!(
+            row.previous, 0.0,
+            "previous should be 0.0 (S3 filter against EC2-only July data); \
+             got {} — a value near 900.00 would mean previous was scoped by \
+             the EC2 filter (current's or a shared one) instead of its own S3 \
+             filter",
+            row.previous
+        );
+    }
+
     #[test]
     fn distinct_services_respects_limit_cap() {
         // Sanity check that the bound LIMIT ? is actually wired up: with
@@ -1755,6 +1807,127 @@ mod tests {
         assert!(
             (summary.total - 200.00).abs() < 1e-6,
             "expected only the Environment=staging row, got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 1);
+    }
+
+    /// DB-level proof of `tags[?] IS DISTINCT FROM ?`'s NULL handling: row 1
+    /// has Environment=production (excluded), row 2 has Environment=staging
+    /// (included — genuinely different value), row 3 has no Tags at all, so
+    /// `tags['Environment']` is SQL NULL, and `NULL IS DISTINCT FROM
+    /// 'production'` is `true` (included) — proving the "no such tag" case
+    /// is correctly treated as "not equal", which a naive `!=` (NULL != x
+    /// is NULL, row excluded) would get wrong.
+    #[test]
+    fn summary_filtered_by_tag_ne() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        filter.tags = vec![TagFilter {
+            key: "Environment".to_string(),
+            operator: TagOperator::Ne,
+            values: vec!["production".to_string()],
+        }];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        // Row 2 (200.00, Environment=staging) + row 3 (50.00, no Tags at
+        // all) = 250.00; row 1 (Environment=production) excluded.
+        assert!(
+            (summary.total - 250.00).abs() < 1e-6,
+            "expected rows 2+3 (staging + missing-tag), got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 2);
+    }
+
+    /// DB-level proof of `tags[?] IS NULL` (`NotExists`): only row 3, which
+    /// has no `Tags` map at all, lacks the `Team` key. Row 1 has Team, row 2
+    /// has no `Team` key either (only `Environment`) but does have a Tags
+    /// map — both must be handled correctly by `map[key] IS NULL` regardless
+    /// of whether the map itself is NULL or just missing that key.
+    #[test]
+    fn summary_filtered_by_tag_not_exists() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        filter.tags = vec![TagFilter {
+            key: "Team".to_string(),
+            operator: TagOperator::NotExists,
+            values: vec![],
+        }];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        // Row 2 (200.00, Tags present but no Team key) + row 3 (50.00, Tags
+        // is NULL entirely) = 250.00; row 1 (has Team) excluded.
+        assert!(
+            (summary.total - 250.00).abs() < 1e-6,
+            "expected rows without a Team key, got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 2);
+    }
+
+    /// DB-level proof of `tags[?] IN (?, ?, ...)`: the structurally novel
+    /// shape combining a bound MAP-subscript key with a bound variable-length
+    /// list, which no other test had exercised against a real DuckDB
+    /// connection before this fix pass.
+    #[test]
+    fn summary_filtered_by_tag_in() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        filter.tags = vec![TagFilter {
+            key: "Environment".to_string(),
+            operator: TagOperator::In,
+            values: vec!["production".to_string(), "staging".to_string()],
+        }];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        // Rows 1 (production, 1034.56) and 2 (staging, 200.00) match; row 3
+        // (no Environment tag at all) is excluded.
+        assert!(
+            (summary.total - 1234.56).abs() < 1e-6,
+            "expected rows 1+2 (production+staging), got {}",
+            summary.total
+        );
+        assert_eq!(summary.row_count, 2);
+    }
+
+    /// DB-level proof of the `resource_ids` filter field: only row 1
+    /// (ResourceId `i-abc123`) should match; rows 2 (`bucket-abc`) and 3
+    /// (`i-def456`) must be excluded.
+    #[test]
+    fn summary_filtered_by_resource_ids() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(&[path]);
+        let repo = DuckDbCostRepository::new(pool);
+
+        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut filter = CostFilter::date_range(start, end);
+        filter.resource_ids = vec!["i-abc123".to_string()];
+
+        let summary = repo.summary(&filter).unwrap();
+
+        assert!(
+            (summary.total - 1034.56).abs() < 1e-6,
+            "expected only the i-abc123 row, got {}",
             summary.total
         );
         assert_eq!(summary.row_count, 1);
