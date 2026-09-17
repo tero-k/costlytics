@@ -34,3 +34,27 @@ export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return 'Unknown error';
 }
+
+// ---------------------------------------------------------------------------
+// Change (current vs. previous period) formatting — shared by `kpiCards.ts`
+// (Overview page) and `explorerTable.ts` (Cost Explorer page), both of which
+// render `compare()`'s `absolute_change` / `percentage_change` fields with
+// the same sign/color convention: for a cost metric, an increase is "bad"
+// (red) and a decrease is "good" (green).
+// ---------------------------------------------------------------------------
+
+/** `pct` is already a percentage value (e.g. `37.2` means 37.2%), per the API's `percentage_change`. */
+export function formatPercent(pct: number): string {
+  const sign = pct > 0 ? '+' : '';
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
+export function formatSignedCurrency(value: number, currency: string): string {
+  const formatted = formatCurrency(Math.abs(value), currency);
+  return value > 0 ? `+${formatted}` : value < 0 ? `-${formatted}` : formatted;
+}
+
+/** CSS class for a cost-metric change value: increase = bad (red), decrease = good (green). */
+export function changeClass(value: number): 'change-bad' | 'change-good' | 'change-neutral' {
+  return value > 0 ? 'change-bad' : value < 0 ? 'change-good' : 'change-neutral';
+}

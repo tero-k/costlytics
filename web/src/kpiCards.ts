@@ -18,8 +18,8 @@
  */
 
 import { getCompare, getSummary } from './api.ts';
-import { addDaysIso, daysBetweenIso } from './shared/dates.ts';
-import { formatCurrency, errorMessage } from './shared/format.ts';
+import { addDaysIso, previousPeriod } from './shared/dates.ts';
+import { formatCurrency, errorMessage, formatPercent, formatSignedCurrency, changeClass } from './shared/format.ts';
 import { readControls, type Controls } from './shared/controls.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 
@@ -84,21 +84,6 @@ function setValue(id: string, value: string, sub?: string, subClass?: string): v
 }
 
 // ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-/** `pct` is already a percentage value (e.g. `37.2` means 37.2%), per the API's `percentage_change`. */
-function formatPercent(pct: number): string {
-  const sign = pct > 0 ? '+' : '';
-  return `${sign}${pct.toFixed(1)}%`;
-}
-
-function formatSignedCurrency(value: number, currency: string): string {
-  const formatted = formatCurrency(Math.abs(value), currency);
-  return value > 0 ? `+${formatted}` : value < 0 ? `-${formatted}` : formatted;
-}
-
-// ---------------------------------------------------------------------------
 // Date helpers not shared with other modules (MTD-specific)
 // ---------------------------------------------------------------------------
 
@@ -133,12 +118,10 @@ async function loadCompareCards(
   // inclusive, so the request's current_end is the day after it.
   const currentStart = controls.startIso;
   const currentEnd = addDaysIso(controls.endIsoInclusive, 1);
-  const durationDays = daysBetweenIso(currentStart, currentEnd);
 
   // Previous period: the same-length window immediately preceding the
   // current one (previous_end === current_start).
-  const previousEnd = currentStart;
-  const previousStart = addDaysIso(currentStart, -durationDays);
+  const { start: previousStart, end: previousEnd } = previousPeriod(currentStart, currentEnd);
 
   try {
     const result = await getCompare({
@@ -163,11 +146,8 @@ async function loadCompareCards(
 
     const changeValue = formatSignedCurrency(row.absolute_change, result.currency);
     const changePct = row.percentage_change === null ? 'N/A' : formatPercent(row.percentage_change);
-    // Cost metric: an increase is bad (red), a decrease is good (green).
-    const changeClass =
-      row.absolute_change > 0 ? 'change-bad' : row.absolute_change < 0 ? 'change-good' : 'change-neutral';
     setValue('kpi-change', `${changeValue} (${changePct})`);
-    document.getElementById('kpi-change')?.classList.add(changeClass);
+    document.getElementById('kpi-change')?.classList.add(changeClass(row.absolute_change));
   } catch (err) {
     if (!refreshGuard.isCurrent(token)) return;
     const message = errorMessage(err);
