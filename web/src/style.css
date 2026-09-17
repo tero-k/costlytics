@@ -87,6 +87,35 @@ body {
   padding: 0.4rem 0.6rem;
 }
 
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.5rem var(--spacing);
+  margin-bottom: calc(var(--spacing) * 1.5);
+}
+
+.status-item {
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.status-sep {
+  opacity: 0.5;
+}
+
+.status-loading {
+  margin-left: auto;
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
 main {
   display: flex;
   flex-direction: column;

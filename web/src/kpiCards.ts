@@ -166,7 +166,7 @@ function readControls(): Controls | null {
 // Fetch + render: current / previous / change (from `compare()`)
 // ---------------------------------------------------------------------------
 
-async function loadCompareCards(controls: Controls): Promise<void> {
+async function loadCompareCards(controls: Controls, onCurrency?: (currency: string) => void): Promise<void> {
   setLoading('kpi-current');
   setLoading('kpi-previous');
   setLoading('kpi-change');
@@ -197,6 +197,7 @@ async function loadCompareCards(controls: Controls): Promise<void> {
       throw new Error('compare() returned no rows');
     }
 
+    onCurrency?.(result.currency);
     setValue('kpi-current', formatCurrency(row.current, result.currency));
     setValue('kpi-previous', formatCurrency(row.previous, result.currency));
 
@@ -259,22 +260,21 @@ async function loadMtdCards(controls: Controls): Promise<void> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-export function initKpiCards(): void {
+export function initKpiCards(onCurrency?: (currency: string) => void): Promise<void> {
   const container = document.querySelector<HTMLElement>('#overview');
-  if (!container) return;
+  if (!container) return Promise.resolve();
 
   renderShell(container);
 
-  const refresh = (): void => {
+  const refresh = async (): Promise<void> => {
     const controls = readControls();
     if (!controls) return;
-    void loadCompareCards(controls);
-    void loadMtdCards(controls);
+    await Promise.allSettled([loadCompareCards(controls, onCurrency), loadMtdCards(controls)]);
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', refresh);
-  document.querySelector('#date-end')?.addEventListener('change', refresh);
-  document.querySelector('#metric-select')?.addEventListener('change', refresh);
+  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
+  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
+  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
 
-  refresh();
+  return refresh();
 }

@@ -257,20 +257,20 @@ function renderChart(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-export function initTrendChart(): void {
+export function initTrendChart(): Promise<void> {
   const container = getContainer();
-  if (!container) return;
+  if (!container) return Promise.resolve();
 
-  const refresh = (): void => {
+  const refresh = async (): Promise<void> => {
     const controls = readControls();
     if (!controls) return;
-    void loadTrendChart(controls);
+    await loadTrendChart(controls);
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', refresh);
-  document.querySelector('#date-end')?.addEventListener('change', refresh);
-  document.querySelector('#metric-select')?.addEventListener('change', refresh);
-  document.querySelector('#granularity-select')?.addEventListener('change', refresh);
+  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
+  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
+  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
+  document.querySelector('#granularity-select')?.addEventListener('change', () => void refresh());
 
-  refresh();
+  return refresh();
 }

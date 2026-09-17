@@ -154,7 +154,11 @@ function ensureChart(containerId: string, container: HTMLElement): echarts.EChar
 // Fetch + render
 // ---------------------------------------------------------------------------
 
-async function loadChart(def: ChartDef, controls: Controls): Promise<void> {
+async function loadChart(
+  def: ChartDef,
+  controls: Controls,
+  summaryPromise: ReturnType<typeof getSummary>,
+): Promise<void> {
   const container = getContainer(def.containerId);
   if (!container) return;
 
@@ -172,11 +176,7 @@ async function loadChart(def: ChartDef, controls: Controls): Promise<void> {
         dimension: def.dimension,
         limit: 10,
       }),
-      getSummary({
-        start,
-        end,
-        metric: controls.metric,
-      }),
+      summaryPromise,
     ]);
 
     if (breakdown.rows.length === 0) {
@@ -264,21 +264,27 @@ function renderChart(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-export function initTopBreakdownCharts(): void {
+export function initTopBreakdownCharts(): Promise<void> {
   const defs = CHART_DEFS.filter((def) => getContainer(def.containerId) !== null);
-  if (defs.length === 0) return;
+  if (defs.length === 0) return Promise.resolve();
 
-  const refresh = (): void => {
+  const refresh = async (): Promise<void> => {
     const controls = readControls();
     if (!controls) return;
-    for (const def of defs) {
-      void loadChart(def, controls);
-    }
+    // Both charts need the same overall total for their "Other" bucket; fetch
+    // it once per refresh cycle and share the in-flight promise instead of
+    // issuing two identical requests.
+    const summaryPromise = getSummary({
+      start: controls.startIso,
+      end: addDaysIso(controls.endIsoInclusive, 1),
+      metric: controls.metric,
+    });
+    await Promise.allSettled(defs.map((def) => loadChart(def, controls, summaryPromise)));
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', refresh);
-  document.querySelector('#date-end')?.addEventListener('change', refresh);
-  document.querySelector('#metric-select')?.addEventListener('change', refresh);
+  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
+  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
+  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
 
-  refresh();
+  return refresh();
 }
