@@ -17,15 +17,13 @@
  * No click/drill-down behavior this session — bars render, nothing else.
  */
 
-import * as echarts from 'echarts';
-import {
-  ApiError,
-  getBreakdown,
-  getSummary,
-  type BreakdownRow,
-  type CostMetric,
-  type Dimension,
-} from './api.ts';
+import { getBreakdown, getSummary, type BreakdownRow, type Dimension } from './api.ts';
+import { addDaysIso } from './shared/dates.ts';
+import { formatCurrency, formatCurrencyCompact, errorMessage } from './shared/format.ts';
+import { escapeHtml } from './shared/html.ts';
+import { readControls, type Controls } from './shared/controls.ts';
+import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
+import { RequestGuard } from './shared/requestGuard.ts';
 
 // ---------------------------------------------------------------------------
 // Config: one entry per chart
@@ -45,110 +43,25 @@ const CHART_DEFS: ChartDef[] = [
 const OTHER_EPSILON_FRACTION = 0.001;
 
 // ---------------------------------------------------------------------------
-// Date helpers (UTC-based, mirroring kpiCards.ts / trendChart.ts conventions)
-// ---------------------------------------------------------------------------
-
-function addDaysIso(dateIso: string, days: number): string {
-  const d = new Date(`${dateIso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-// ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
-
-function formatCurrency(value: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
-  } catch {
-    return `${value.toFixed(2)} ${currency}`;
-  }
-}
-
-function formatCurrencyCompact(value: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency,
-      notation: 'compact',
-      maximumFractionDigits: 1,
-    }).format(value);
-  } catch {
-    return `${value.toFixed(0)} ${currency}`;
-  }
-}
 
 function formatKeyLabel(key: string | null): string {
   return key === null || key === '' ? '(none)' : key;
 }
 
-function errorMessage(err: unknown): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error) return err.message;
-  return 'Unknown error';
-}
-
 // ---------------------------------------------------------------------------
-// Controls
+// Chart state / DOM helpers
 // ---------------------------------------------------------------------------
-
-interface Controls {
-  metric: CostMetric;
-  startIso: string;
-  endIsoInclusive: string;
-}
-
-function readControls(): Controls | null {
-  const startInput = document.querySelector<HTMLInputElement>('#date-start');
-  const endInput = document.querySelector<HTMLInputElement>('#date-end');
-  const metricSelect = document.querySelector<HTMLSelectElement>('#metric-select');
-  if (!startInput?.value || !endInput?.value) return null;
-
-  return {
-    metric: (metricSelect?.value as CostMetric | undefined) ?? 'amortized',
-    startIso: startInput.value,
-    endIsoInclusive: endInput.value,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Chart state / DOM helpers (one ECharts instance per chart def)
-// ---------------------------------------------------------------------------
-
-const chartInstances = new Map<string, echarts.ECharts>();
 
 function getContainer(containerId: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`#${containerId}`);
 }
 
-function clearOverlays(container: HTMLElement): void {
-  container.querySelectorAll('.chart-empty, .chart-error').forEach((el) => el.remove());
-}
-
-function showOverlay(
-  containerId: string,
-  container: HTMLElement,
-  className: 'chart-empty' | 'chart-error',
-  message: string,
-): void {
-  clearOverlays(container);
-  chartInstances.get(containerId)?.clear();
-  const overlay = document.createElement('div');
-  overlay.className = className;
-  overlay.textContent = message;
-  container.appendChild(overlay);
-}
-
-function ensureChart(containerId: string, container: HTMLElement): echarts.ECharts {
-  let instance = chartInstances.get(containerId);
-  if (!instance || instance.isDisposed()) {
-    instance = echarts.init(container);
-    chartInstances.set(containerId, instance);
-    window.addEventListener('resize', () => instance?.resize());
-  }
-  return instance;
-}
+// Guards the whole refresh cycle: both charts in a given `refresh()` call
+// share one token, since they're issued together and should be discarded
+// together if a newer refresh has since started.
+const refreshGuard = new RequestGuard();
 
 // ---------------------------------------------------------------------------
 // Fetch + render
@@ -158,6 +71,8 @@ async function loadChart(
   def: ChartDef,
   controls: Controls,
   summaryPromise: ReturnType<typeof getSummary>,
+  token: number,
+  onCurrency?: (currency: string) => void,
 ): Promise<void> {
   const container = getContainer(def.containerId);
   if (!container) return;
@@ -179,10 +94,14 @@ async function loadChart(
       summaryPromise,
     ]);
 
+    if (!refreshGuard.isCurrent(token)) return;
+
     if (breakdown.rows.length === 0) {
       showOverlay(def.containerId, container, 'chart-empty', 'No data for this period.');
       return;
     }
+
+    onCurrency?.(breakdown.currency);
 
     const rows: Array<{ label: string; total: number }> = breakdown.rows.map((row: BreakdownRow) => ({
       label: formatKeyLabel(row.key),
@@ -197,6 +116,7 @@ async function loadChart(
 
     renderChart(def.containerId, container, rows, breakdown.currency);
   } catch (err) {
+    if (!refreshGuard.isCurrent(token)) return;
     showOverlay(def.containerId, container, 'chart-error', errorMessage(err));
   }
 }
@@ -226,7 +146,12 @@ function renderChart(
           if (!first) return '';
           const row = reversed[first.dataIndex];
           if (!row) return '';
-          return [`<strong>${row.label}</strong>`, formatCurrency(row.total, currency)].join('<br/>');
+          // `row.label` traces back to `breakdown()`'s `key` field, i.e.
+          // real cost-data values (service/account/resource/tag names) —
+          // escape before interpolating into the HTML `tooltip` formatter
+          // returns (ECharts' default `renderMode: 'html'` does not escape
+          // it for us).
+          return [`<strong>${escapeHtml(row.label)}</strong>`, formatCurrency(row.total, currency)].join('<br/>');
         },
       },
       grid: {
@@ -264,13 +189,14 @@ function renderChart(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-export function initTopBreakdownCharts(): Promise<void> {
+export function initTopBreakdownCharts(onCurrency?: (currency: string) => void): Promise<void> {
   const defs = CHART_DEFS.filter((def) => getContainer(def.containerId) !== null);
   if (defs.length === 0) return Promise.resolve();
 
   const refresh = async (): Promise<void> => {
     const controls = readControls();
     if (!controls) return;
+    const token = refreshGuard.next();
     // Both charts need the same overall total for their "Other" bucket; fetch
     // it once per refresh cycle and share the in-flight promise instead of
     // issuing two identical requests.
@@ -279,7 +205,7 @@ export function initTopBreakdownCharts(): Promise<void> {
       end: addDaysIso(controls.endIsoInclusive, 1),
       metric: controls.metric,
     });
-    await Promise.allSettled(defs.map((def) => loadChart(def, controls, summaryPromise)));
+    await Promise.allSettled(defs.map((def) => loadChart(def, controls, summaryPromise, token, onCurrency)));
   };
 
   document.querySelector('#date-start')?.addEventListener('change', () => void refresh());

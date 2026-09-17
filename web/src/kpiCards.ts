@@ -17,7 +17,11 @@
  * not prevent the other group from rendering.
  */
 
-import { ApiError, getCompare, getSummary, type CostMetric } from './api.ts';
+import { getCompare, getSummary } from './api.ts';
+import { addDaysIso, daysBetweenIso } from './shared/dates.ts';
+import { formatCurrency, errorMessage } from './shared/format.ts';
+import { readControls, type Controls } from './shared/controls.ts';
+import { RequestGuard } from './shared/requestGuard.ts';
 
 // ---------------------------------------------------------------------------
 // DOM shell
@@ -83,16 +87,6 @@ function setValue(id: string, value: string, sub?: string, subClass?: string): v
 // Formatting
 // ---------------------------------------------------------------------------
 
-function formatCurrency(value: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
-  } catch {
-    // Fall back gracefully if the API ever returns a currency code that
-    // Intl doesn't recognize.
-    return `${value.toFixed(2)} ${currency}`;
-  }
-}
-
 /** `pct` is already a percentage value (e.g. `37.2` means 37.2%), per the API's `percentage_change`. */
 function formatPercent(pct: number): string {
   const sign = pct > 0 ? '+' : '';
@@ -104,27 +98,9 @@ function formatSignedCurrency(value: number, currency: string): string {
   return value > 0 ? `+${formatted}` : value < 0 ? `-${formatted}` : formatted;
 }
 
-function errorMessage(err: unknown): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error) return err.message;
-  return 'Unknown error';
-}
-
 // ---------------------------------------------------------------------------
-// Date helpers (all UTC-based to avoid local-timezone off-by-one errors)
+// Date helpers not shared with other modules (MTD-specific)
 // ---------------------------------------------------------------------------
-
-function addDaysIso(dateIso: string, days: number): string {
-  const d = new Date(`${dateIso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-function daysBetweenIso(startIso: string, endIsoExclusive: string): number {
-  const start = new Date(`${startIso}T00:00:00Z`).getTime();
-  const end = new Date(`${endIsoExclusive}T00:00:00Z`).getTime();
-  return Math.round((end - start) / 86_400_000);
-}
 
 function toDateIso(date: Date): string {
   const year = date.getFullYear();
@@ -137,36 +113,18 @@ function daysInMonth(year: number, monthIndex0: number): number {
   return new Date(year, monthIndex0 + 1, 0).getDate();
 }
 
-// ---------------------------------------------------------------------------
-// Controls
-// ---------------------------------------------------------------------------
-
-interface Controls {
-  metric: CostMetric;
-  /** Inclusive start date (`YYYY-MM-DD`), as selected in the date picker. */
-  startIso: string;
-  /** Inclusive end date (`YYYY-MM-DD`), as selected in the date picker. */
-  endIsoInclusive: string;
-}
-
-function readControls(): Controls | null {
-  const startInput = document.querySelector<HTMLInputElement>('#date-start');
-  const endInput = document.querySelector<HTMLInputElement>('#date-end');
-  const metricSelect = document.querySelector<HTMLSelectElement>('#metric-select');
-  if (!startInput?.value || !endInput?.value) return null;
-
-  return {
-    metric: (metricSelect?.value as CostMetric | undefined) ?? 'amortized',
-    startIso: startInput.value,
-    endIsoInclusive: endInput.value,
-  };
-}
+// Guards both fetch groups within a single `refresh()` cycle together.
+const refreshGuard = new RequestGuard();
 
 // ---------------------------------------------------------------------------
 // Fetch + render: current / previous / change (from `compare()`)
 // ---------------------------------------------------------------------------
 
-async function loadCompareCards(controls: Controls, onCurrency?: (currency: string) => void): Promise<void> {
+async function loadCompareCards(
+  controls: Controls,
+  token: number,
+  onCurrency?: (currency: string) => void,
+): Promise<void> {
   setLoading('kpi-current');
   setLoading('kpi-previous');
   setLoading('kpi-change');
@@ -192,6 +150,8 @@ async function loadCompareCards(controls: Controls, onCurrency?: (currency: stri
       // dimension omitted -> a single aggregate row with key: null
     });
 
+    if (!refreshGuard.isCurrent(token)) return;
+
     const row = result.rows.find((r) => r.key === null) ?? result.rows[0];
     if (!row) {
       throw new Error('compare() returned no rows');
@@ -209,6 +169,7 @@ async function loadCompareCards(controls: Controls, onCurrency?: (currency: stri
     setValue('kpi-change', `${changeValue} (${changePct})`);
     document.getElementById('kpi-change')?.classList.add(changeClass);
   } catch (err) {
+    if (!refreshGuard.isCurrent(token)) return;
     const message = errorMessage(err);
     setError('kpi-current', message);
     setError('kpi-previous', message);
@@ -220,7 +181,11 @@ async function loadCompareCards(controls: Controls, onCurrency?: (currency: stri
 // Fetch + render: month-to-date + projected run-rate (from `summary()`)
 // ---------------------------------------------------------------------------
 
-async function loadMtdCards(controls: Controls): Promise<void> {
+async function loadMtdCards(
+  controls: Controls,
+  token: number,
+  onCurrency?: (currency: string) => void,
+): Promise<void> {
   setLoading('kpi-mtd');
   setLoading('kpi-projected');
 
@@ -241,6 +206,9 @@ async function loadMtdCards(controls: Controls): Promise<void> {
       metric: controls.metric,
     });
 
+    if (!refreshGuard.isCurrent(token)) return;
+
+    onCurrency?.(summary.currency);
     setValue('kpi-mtd', formatCurrency(summary.total, summary.currency));
 
     const projected = dayOfMonth > 0 ? (summary.total / dayOfMonth) * totalDaysInMonth : summary.total;
@@ -250,6 +218,7 @@ async function loadMtdCards(controls: Controls): Promise<void> {
       `Based on ${dayOfMonth} of ${totalDaysInMonth} days elapsed`,
     );
   } catch (err) {
+    if (!refreshGuard.isCurrent(token)) return;
     const message = errorMessage(err);
     setError('kpi-mtd', message);
     setError('kpi-projected', message);
@@ -269,7 +238,11 @@ export function initKpiCards(onCurrency?: (currency: string) => void): Promise<v
   const refresh = async (): Promise<void> => {
     const controls = readControls();
     if (!controls) return;
-    await Promise.allSettled([loadCompareCards(controls, onCurrency), loadMtdCards(controls)]);
+    const token = refreshGuard.next();
+    await Promise.allSettled([
+      loadCompareCards(controls, token, onCurrency),
+      loadMtdCards(controls, token, onCurrency),
+    ]);
   };
 
   document.querySelector('#date-start')?.addEventListener('change', () => void refresh());

@@ -110,10 +110,16 @@ async function bootstrap(): Promise<void> {
     // only governs how long the page-level "Loading..." indicator shows for
     // the *initial* load — a slow or failing component never blocks or
     // hides the others.
+    // All three fetching modules report their observed currency through the
+    // same `updateStatusCurrency` callback (plan §57: the status bar's
+    // currency must always be visible/current), so the status bar updates
+    // from whichever component succeeds first/most-recently, regardless of
+    // which other components are failing (e.g. `compare()` 409ing on
+    // multi-currency data while `timeseries()`/`breakdown()` still succeed).
     await Promise.allSettled([
       initKpiCards(updateStatusCurrency),
-      initTrendChart(),
-      initTopBreakdownCharts(),
+      initTrendChart(updateStatusCurrency),
+      initTopBreakdownCharts(updateStatusCurrency),
     ]);
   } finally {
     setLoadingIndicatorVisible(false);
