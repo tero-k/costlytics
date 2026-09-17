@@ -369,6 +369,161 @@ pub fn generate_cur2_fixture(base_dir: &Path) -> Result<(), FixtureError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Demo fixture: a larger synthetic FOCUS 1.2 dataset for frontend dev/demo
+// use (NOT used by any Rust test — safe to reshape freely without touching
+// `generate_focus12_fixture`/`generate_cur2_fixture`, which golden-value
+// tests above depend on for exact totals/row counts).
+//
+// Unlike the golden fixtures (3 services, 1 account, 2 months), this dataset
+// is wide enough to actually exercise the Overview page's own frontend
+// logic against real data:
+//   - 22 distinct services (> 10) so the top-services breakdown's "Other"
+//     bucket and 10-item truncation both render for real, not just in code.
+//   - 3 distinct accounts.
+//   - Several rows with a NULL `ServiceName` (untagged/uncategorized spend)
+//     so the breakdown's `(none)` label renders for real.
+//   - Rows spread across a full month so the trend chart has real day-level
+//     variation.
+// ---------------------------------------------------------------------------
+
+const DEMO_SERVICES: &[&str] = &[
+    "EC2",
+    "S3",
+    "RDS",
+    "Lambda",
+    "CloudFront",
+    "DynamoDB",
+    "ELB",
+    "EBS",
+    "VPC",
+    "Route53",
+    "SNS",
+    "SQS",
+    "CloudWatch",
+    "KMS",
+    "Secrets Manager",
+    "ECS",
+    "EKS",
+    "Redshift",
+    "Athena",
+    "Glue",
+    "Elasticache",
+    "Kinesis",
+];
+
+const DEMO_ACCOUNTS: &[&str] = &["acct-101", "acct-102", "acct-103"];
+
+/// Generate a larger, wider synthetic FOCUS 1.2 Parquet dataset for
+/// frontend dev/demo use (not referenced by any Rust test).
+///
+/// Layout:
+/// ```text
+/// {base_dir}/BILLING_PERIOD=2026-08/data.parquet
+/// {base_dir}/BILLING_PERIOD=2026-08/Manifest.json
+/// ```
+///
+/// Produces one row per (service, account) pair across August 2026 (22
+/// services x 3 accounts = 66 rows), plus a handful of rows with a NULL
+/// `ServiceName` to exercise the `(none)` breakdown label.
+pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch("LOAD parquet;")?;
+
+    let dir = base_dir.join("BILLING_PERIOD=2026-08");
+    fs::create_dir_all(&dir)?;
+    let parquet_path = dir.join("data.parquet");
+    let parquet_str = parquet_path.to_str().unwrap().replace('\\', "/");
+
+    let mut rows: Vec<String> = Vec::new();
+    let mut counter: i64 = 0;
+    for (svc_idx, service) in DEMO_SERVICES.iter().enumerate() {
+        for (acct_idx, account) in DEMO_ACCOUNTS.iter().enumerate() {
+            let day = 1 + ((counter as u64 * 7) % 27); // spread across the month, 1..=27
+            let base_cost = 40.0 + (svc_idx as f64) * 23.5 + (acct_idx as f64) * 11.0;
+            let billed = (base_cost * 0.92 * 100.0).round() / 100.0;
+            let resource_id = format!("res-{svc_idx}-{acct_idx}");
+            rows.push(format!(
+                "('{service}', '{account}', '{resource_id}', {day}, {base_cost}, {billed})",
+            ));
+            counter += 1;
+        }
+    }
+
+    // A few rows with a NULL ServiceName (untagged/uncategorized spend),
+    // spread across a couple of accounts, so the breakdown's `(none)` label
+    // has real data behind it.
+    let none_rows: Vec<String> = vec![
+        format!("(NULL, '{}', 'res-untagged-1', 3, 275.00, 250.00)", DEMO_ACCOUNTS[0]),
+        format!("(NULL, '{}', 'res-untagged-2', 18, 140.50, 129.00)", DEMO_ACCOUNTS[2]),
+    ];
+    rows.extend(none_rows);
+
+    let values_sql = rows.join(",\n                ");
+
+    let sql = format!(
+        r#"COPY (
+            WITH t AS (
+              SELECT * FROM (VALUES
+                {values_sql}
+              ) AS t(service_name, account_id, resource_id, day, effective_cost, billed_cost)
+            )
+            SELECT
+                TIMESTAMP '2026-08-01 00:00:00' AS BillingPeriodStart,
+                TIMESTAMP '2026-09-01 00:00:00' AS BillingPeriodEnd,
+                (TIMESTAMP '2026-08-01 00:00:00' + (day || ' days')::INTERVAL - INTERVAL 1 DAY) AS ChargePeriodStart,
+                (TIMESTAMP '2026-08-01 00:00:00' + (day || ' days')::INTERVAL) AS ChargePeriodEnd,
+                'payer-001'     AS BillingAccountId,
+                'Payer Name'    AS BillingAccountName,
+                account_id      AS SubAccountId,
+                account_id      AS SubAccountName,
+                'AWS'           AS ProviderName,
+                'Amazon'        AS PublisherName,
+                service_name    AS ServiceName,
+                'Compute'       AS ServiceCategory,
+                'General'       AS ServiceSubcategory,
+                'us-east-1'     AS RegionName,
+                'us-east-1a'    AS AvailabilityZone,
+                resource_id     AS ResourceId,
+                resource_id     AS ResourceName,
+                'generic'       AS ResourceType,
+                'Usage'         AS ChargeCategory,
+                NULL::VARCHAR   AS ChargeClass,
+                'Recurring'     AS ChargeFrequency,
+                'usage'         AS ChargeDescription,
+                'OnDemand'      AS PricingCategory,
+                1.0             AS ConsumedQuantity,
+                'Hours'         AS ConsumedUnit,
+                billed_cost     AS BilledCost,
+                effective_cost  AS EffectiveCost,
+                effective_cost * 1.15 AS ListCost,
+                effective_cost * 1.05 AS ContractedCost,
+                'USD'           AS BillingCurrency,
+                NULL::MAP(VARCHAR, VARCHAR) AS Tags,
+                NULL::VARCHAR   AS CommitmentDiscountId,
+                NULL::VARCHAR   AS CommitmentDiscountType,
+                NULL::VARCHAR   AS CommitmentDiscountStatus,
+                NULL::VARCHAR   AS x_ServiceCode
+            FROM t
+        ) TO '{parquet_str}' (FORMAT PARQUET)"#,
+    );
+    conn.execute_batch(&sql)?;
+
+    let manifest = serde_json::json!({
+        "dataFiles": ["data.parquet"],
+        "billingPeriod": {
+            "start": "2026-08-01T00:00:00Z",
+            "end": "2026-09-01T00:00:00Z"
+        }
+    });
+    fs::write(
+        dir.join("Manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

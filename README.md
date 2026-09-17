@@ -16,11 +16,16 @@ cargo run -p data --bin generate-fixtures
 This writes a synthetic FOCUS 1.2 dataset to `fixtures/focus12/` and a
 synthetic CUR 2.0 dataset to `fixtures/cur2/` using the same generator
 functions (`data::fixtures::generate_focus12_fixture`/`generate_cur2_fixture`)
-the test suite relies on. `cargo run -p api` loads `config/example.toml`
-directly, which already registers both `local-focus12` and `local-cur2`
-sources pointing at these directories, so after generating the fixtures both
-sources are immediately queryable. Alternatively, point a `[[sources]]`
-entry at a real FOCUS 1.2 or CUR 2.0 export directory (FOCUS 1.2 layout:
+the test suite relies on, plus a third, larger synthetic FOCUS 1.2 dataset to
+`fixtures/demo/` (`data::fixtures::generate_demo_fixture`, not used by any
+Rust test) with 22 services, 3 accounts, and some untagged rows — wide
+enough to exercise the frontend Overview page's "Other" bucket, top-10
+truncation, and `(none)` label against real data. `cargo run -p api` loads
+`config/example.toml` directly, which already registers `local-focus12`,
+`local-cur2`, and `local-demo` sources pointing at these directories, so
+after generating the fixtures all three sources are immediately queryable.
+Alternatively, point a `[[sources]]` entry at a real FOCUS 1.2 or CUR 2.0
+export directory (FOCUS 1.2 layout:
 `{base}/BILLING_PERIOD=YYYY-MM/{data.parquet,Manifest.json}`).
 
 The full startup pipeline (partition discovery -> schema detection -> view

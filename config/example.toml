@@ -13,3 +13,9 @@ id = "local-cur2"
 name = "Local CUR 2.0 fixture"
 s3_uri = "fixtures/cur2"
 source_type = "cur2"
+
+[[sources]]
+id = "local-demo"
+name = "Local demo fixture (wide, for frontend dev)"
+s3_uri = "fixtures/demo"
+source_type = "focus12"
