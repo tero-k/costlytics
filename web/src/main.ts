@@ -1,12 +1,13 @@
 import './style.css';
+import { initKpiCards } from './kpiCards.ts';
 
 /**
  * Basic app shell for the Costlytics Overview page.
  *
  * This bootstraps the date-range / metric controls with sensible defaults
- * (current month to date, amortized metric). No data fetching or chart
- * rendering happens here yet — that lands in later tasks, which will read
- * these controls' values and populate `#overview` via `src/api.ts`.
+ * (current month to date, amortized metric), then wires up the KPI card
+ * row, which reads these controls' values and populates `#overview` via
+ * `src/api.ts`. Chart rendering lands in a later task.
  */
 
 function toDateInputValue(date: Date): string {
@@ -29,3 +30,4 @@ function initDateRangeDefaults(): void {
 }
 
 initDateRangeDefaults();
+initKpiCards();

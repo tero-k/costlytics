@@ -9,6 +9,8 @@
   --color-text: #1a1d23;
   --color-text-muted: #6b7280;
   --color-accent: #2563eb;
+  --color-danger: #dc2626;
+  --color-success: #16a34a;
   --spacing: 1rem;
   --radius: 8px;
 }
@@ -21,6 +23,8 @@
     --color-text: #eaecef;
     --color-text-muted: #9aa1ac;
     --color-accent: #5b8def;
+    --color-danger: #f87171;
+    --color-success: #4ade80;
   }
 }
 
@@ -116,6 +120,33 @@ main {
   font-size: 1.75rem;
   font-weight: 600;
   margin-top: 0.25rem;
+}
+
+.kpi-card .sub {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-top: 0.25rem;
+  min-height: 1em;
+}
+
+.kpi-card.loading .value {
+  opacity: 0.5;
+}
+
+.kpi-card.error .value {
+  color: var(--color-danger);
+}
+
+.kpi-card.error .sub {
+  color: var(--color-danger);
+}
+
+.kpi-card.change-bad .value {
+  color: var(--color-danger);
+}
+
+.kpi-card.change-good .value {
+  color: var(--color-success);
 }
 
 .chart-area {
