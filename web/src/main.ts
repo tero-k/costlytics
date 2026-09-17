@@ -1,6 +1,7 @@
 import './style.css';
 import { initKpiCards } from './kpiCards.ts';
 import { initTrendChart } from './trendChart.ts';
+import { initTopBreakdownCharts } from './topBreakdown.ts';
 
 /**
  * Basic app shell for the Costlytics Overview page.
@@ -33,3 +34,4 @@ function initDateRangeDefaults(): void {
 initDateRangeDefaults();
 initKpiCards();
 initTrendChart();
+initTopBreakdownCharts();

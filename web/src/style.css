@@ -190,6 +190,12 @@ main {
   padding: var(--spacing);
 }
 
+.top-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: calc(var(--spacing) * 1.5);
+}
+
 .chart-area .chart-error {
   position: absolute;
   inset: 0;
