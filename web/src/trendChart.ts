@@ -23,33 +23,13 @@ import { escapeHtml } from './shared/html.ts';
 import { readControls, type Controls } from './shared/controls.ts';
 import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
+import { autoGranularity, formatPeriodLabel } from './shared/granularity.ts';
 
 const CONTAINER_ID = 'trend-chart';
-
-/** Auto-select granularity per plan §20's rule, from the range length in days. */
-function autoGranularity(durationDays: number): TimeGranularity {
-  if (durationDays <= 90) return 'day';
-  if (durationDays <= 366 * 3) return 'month';
-  return 'year';
-}
 
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
-
-function formatPeriodLabel(periodIso: string, granularity: TimeGranularity): string {
-  const date = new Date(periodIso);
-  if (Number.isNaN(date.getTime())) return periodIso;
-
-  switch (granularity) {
-    case 'day':
-      return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(date);
-    case 'month':
-      return new Intl.DateTimeFormat(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' }).format(date);
-    case 'year':
-      return new Intl.DateTimeFormat(undefined, { year: 'numeric', timeZone: 'UTC' }).format(date);
-  }
-}
 
 function readGranularitySelection(): TimeGranularity | 'auto' {
   const select = document.querySelector<HTMLSelectElement>('#granularity-select');

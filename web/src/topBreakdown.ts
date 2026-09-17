@@ -24,6 +24,7 @@ import { escapeHtml } from './shared/html.ts';
 import { readControls, type Controls } from './shared/controls.ts';
 import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
+import { formatKeyLabel } from './shared/labels.ts';
 
 // ---------------------------------------------------------------------------
 // Config: one entry per chart
@@ -41,14 +42,6 @@ const CHART_DEFS: ChartDef[] = [
 
 /** Below this fraction of the overall total, the "Other" bucket is omitted as negligible. */
 const OTHER_EPSILON_FRACTION = 0.001;
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-function formatKeyLabel(key: string | null): string {
-  return key === null || key === '' ? '(none)' : key;
-}
 
 // ---------------------------------------------------------------------------
 // Chart state / DOM helpers

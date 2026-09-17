@@ -1,24 +1,29 @@
 import './style.css';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible } from './shared/statusBar.ts';
+import {
+  initDateRangeDefaults,
+  initStatusBar,
+  setLoadingIndicatorVisible,
+  updateStatusCurrency,
+} from './shared/statusBar.ts';
+import { initExplorerTrendChart } from './explorerTrend.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Cost Explorer page.
  *
  * Mirrors `main.ts`'s bootstrap pattern (shared status bar / date-range
- * defaults, an `allSettled`-based initial-load indicator), but this page
- * has no per-component modules yet — the trend chart (`#explorer-trend`)
- * and breakdown table (`#explorer-table`) are built in later tasks. Those
- * tasks register their `init*` functions into `refreshers` below rather
- * than editing this bootstrap function directly.
+ * defaults, an `allSettled`-based initial-load indicator). The grouped
+ * trend chart (`#explorer-trend`, Task 2) registers itself below; the
+ * breakdown table (`#explorer-table`) is built in a later task and should
+ * register its `init*` function into `refreshers` too rather than editing
+ * this bootstrap function directly.
  */
 
 /**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). Populated by later tasks (trend chart, breakdown table); left
- * empty here since Task 1 only builds the page shell and controls.
+ * failure).
  */
-const refreshers: Array<() => Promise<void>> = [];
+const refreshers: Array<() => Promise<void>> = [() => initExplorerTrendChart(updateStatusCurrency)];
 
 async function bootstrap(): Promise<void> {
   initDateRangeDefaults();
