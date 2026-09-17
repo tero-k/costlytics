@@ -5,7 +5,7 @@
  * `main.ts`'s module doc comment).
  */
 
-import type { CostMetric } from '../api.ts';
+import type { CostMetric, Dimension } from '../api.ts';
 
 export interface Controls {
   metric: CostMetric;
@@ -26,4 +26,33 @@ export function readControls(): Controls | null {
     startIso: startInput.value,
     endIsoInclusive: endInput.value,
   };
+}
+
+/**
+ * Cost Explorer page-local extension of {@link Controls}, adding the
+ * "Group by" dimension and "Top N" controls that only exist on that page
+ * (`#dimension-select` / `#top-n-input` in `explorer.html`). Composes the
+ * shared type rather than growing it, so the Overview page's usage of
+ * `Controls`/`readControls()` is unaffected.
+ */
+export interface ExplorerControls extends Controls {
+  dimension: Dimension;
+  topN: number;
+}
+
+const DEFAULT_DIMENSION: Dimension = 'service';
+const DEFAULT_TOP_N = 10;
+
+export function readExplorerControls(): ExplorerControls | null {
+  const base = readControls();
+  if (!base) return null;
+
+  const dimensionSelect = document.querySelector<HTMLSelectElement>('#dimension-select');
+  const topNInput = document.querySelector<HTMLInputElement>('#top-n-input');
+
+  const dimension = (dimensionSelect?.value as Dimension | undefined) ?? DEFAULT_DIMENSION;
+  const parsedTopN = topNInput?.value ? Number.parseInt(topNInput.value, 10) : NaN;
+  const topN = Number.isFinite(parsedTopN) && parsedTopN > 0 ? parsedTopN : DEFAULT_TOP_N;
+
+  return { ...base, dimension, topN };
 }

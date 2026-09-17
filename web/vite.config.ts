@@ -1,4 +1,8 @@
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
+
+const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -10,6 +14,18 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
+      },
+    },
+  },
+  build: {
+    rollupOptions: {
+      // Two pages: the Overview dashboard (`index.html`) and the Cost
+      // Explorer (`explorer.html`), sharing the same shared/ modules and
+      // stylesheet. Vite's default single-entry build only picks up
+      // `index.html`, so both must be listed explicitly here.
+      input: {
+        index: resolve(rootDir, 'index.html'),
+        explorer: resolve(rootDir, 'explorer.html'),
       },
     },
   },

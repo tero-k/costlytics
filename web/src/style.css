@@ -61,6 +61,29 @@ body {
   margin: 0;
 }
 
+.app-nav {
+  display: flex;
+  gap: 1rem;
+}
+
+.app-nav a {
+  color: var(--color-text-muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  padding: 0.25rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.app-nav a:hover {
+  color: var(--color-text);
+}
+
+.app-nav a.active {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;

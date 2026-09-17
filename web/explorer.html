@@ -3,15 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Costlytics</title>
+    <title>Costlytics — Cost Explorer</title>
   </head>
   <body>
     <div id="app">
       <header class="app-header">
         <h1>Costlytics</h1>
         <nav class="app-nav">
-          <a href="/" class="active">Overview</a>
-          <a href="/explorer.html">Cost Explorer</a>
+          <a href="/">Overview</a>
+          <a href="/explorer.html" class="active">Cost Explorer</a>
         </nav>
         <div class="controls">
           <label class="control">
@@ -31,6 +31,22 @@
               <option value="contracted">Contracted</option>
             </select>
           </label>
+          <label class="control">
+            <span>Group by</span>
+            <select id="dimension-select">
+              <option value="service" selected>Service</option>
+              <option value="account">Account</option>
+              <option value="region">Region</option>
+              <option value="availability_zone">Availability zone</option>
+              <option value="charge_category">Charge category</option>
+              <option value="pricing_category">Pricing category</option>
+              <option value="resource">Resource</option>
+            </select>
+          </label>
+          <label class="control">
+            <span>Top N</span>
+            <input type="number" id="top-n-input" min="1" max="50" value="10" />
+          </label>
         </div>
       </header>
       <div class="status-bar" id="status-bar">
@@ -42,38 +58,21 @@
         <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
       </div>
       <main>
-        <div id="overview"></div>
         <section class="chart-section">
           <div class="chart-header">
             <h2>Cost trend</h2>
-            <label class="control">
-              <span>Granularity</span>
-              <select id="granularity-select">
-                <option value="auto" selected>Auto</option>
-                <option value="day">Day</option>
-                <option value="month">Month</option>
-                <option value="year">Year</option>
-              </select>
-            </label>
+            <button type="button" id="csv-export-btn">Export CSV</button>
           </div>
-          <div class="chart-area" id="trend-chart"></div>
+          <div class="chart-area" id="explorer-trend"></div>
         </section>
-        <section class="top-breakdown-grid">
-          <div class="chart-section">
-            <div class="chart-header">
-              <h2>Top services</h2>
-            </div>
-            <div class="chart-area" id="top-services"></div>
+        <section class="chart-section">
+          <div class="chart-header">
+            <h2>Breakdown</h2>
           </div>
-          <div class="chart-section">
-            <div class="chart-header">
-              <h2>Top accounts</h2>
-            </div>
-            <div class="chart-area" id="top-accounts"></div>
-          </div>
+          <div id="explorer-table"></div>
         </section>
       </main>
     </div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/explorerMain.ts"></script>
   </body>
 </html>
