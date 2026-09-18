@@ -293,6 +293,37 @@ function renderTable(container: HTMLElement): void {
 }
 
 // ---------------------------------------------------------------------------
+// CSV export
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the table's current column headers plus its CURRENTLY RENDERED
+ * rows (respecting whatever sort column/direction is active), each cell
+ * pre-formatted exactly as it's displayed on screen (formatted currency,
+ * "N/A" for a null Difference %, etc.) — i.e. what a user exporting "this
+ * table" would expect the CSV to contain. Returns `null` when there is
+ * nothing rendered to export (no data loaded yet, or an error/empty state).
+ */
+export function getExportTableData(): { headers: string[]; rows: string[][] } | null {
+  if (!lastRows) return null;
+
+  const rows = sortedRows(lastRows).map((row) => {
+    const label = row.isOther ? OTHER_LABEL : formatKeyLabel(row.key);
+    const diffPctText = row.percentageChange === null ? 'N/A' : formatPercent(row.percentageChange);
+    return [
+      label,
+      formatCurrency(row.current, lastCurrency),
+      formatCurrency(row.previous, lastCurrency),
+      formatSignedCurrency(row.absoluteChange, lastCurrency),
+      diffPctText,
+      `${row.percentageTotal.toFixed(1)}%`,
+    ];
+  });
+
+  return { headers: COLUMNS.map((col) => col.label), rows };
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
