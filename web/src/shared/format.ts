@@ -5,13 +5,30 @@
 
 import { ApiError } from '../api.ts';
 
+/**
+ * `currency` is NOT app configuration — it comes straight from the source
+ * cost data (`BillingCurrency` in FOCUS 1.2, cast to `VARCHAR` by the data
+ * layer) and reaches the API response unvalidated. `Intl.NumberFormat`
+ * throws a `RangeError` for anything that isn't a well-formed currency
+ * code, and both formatters below fall back to interpolating `currency`
+ * directly into a plain string that callers embed as raw HTML (table
+ * cells, chart tooltips). Sanitize it before it ever reaches that fallback
+ * string: if it doesn't look like a plausible currency code/label, drop it
+ * entirely rather than trying to escape it — a degraded "just show the
+ * number" fallback is safe, echoing an attacker-controlled string into HTML
+ * is not.
+ */
+function sanitizeCurrencyForFallback(currency: string): string {
+  return /^[A-Za-z0-9 ]{0,12}$/.test(currency) ? currency : '';
+}
+
 export function formatCurrency(value: number, currency: string): string {
   try {
     return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
   } catch {
     // Fall back gracefully if the API ever returns a currency code that
     // Intl doesn't recognize.
-    return `${value.toFixed(2)} ${currency}`;
+    return `${value.toFixed(2)} ${sanitizeCurrencyForFallback(currency)}`.trimEnd();
   }
 }
 
@@ -24,7 +41,7 @@ export function formatCurrencyCompact(value: number, currency: string): string {
       maximumFractionDigits: 1,
     }).format(value);
   } catch {
-    return `${value.toFixed(0)} ${currency}`;
+    return `${value.toFixed(0)} ${sanitizeCurrencyForFallback(currency)}`.trimEnd();
   }
 }
 
