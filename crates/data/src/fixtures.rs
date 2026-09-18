@@ -204,6 +204,99 @@ fn generate_september_partition(conn: &Connection, base_dir: &Path) -> Result<()
     Ok(())
 }
 
+/// Known totals for the FOCUS 1.0 fixture dataset (used as golden values in tests).
+pub const FIXTURE_FOCUS10_AMORTIZED_TOTAL_AUG: f64 = 900.00; // August 2026
+pub const FIXTURE_FOCUS10_BILLED_TOTAL_AUG: f64 = 1000.00; // August 2026
+
+/// Generate a synthetic FOCUS 1.0 Parquet dataset in the given directory.
+///
+/// Layout:
+/// ```text
+/// {base_dir}/BILLING_PERIOD=2026-08/data.parquet
+/// {base_dir}/BILLING_PERIOD=2026-08/Manifest.json
+/// ```
+///
+/// Two rows (August 2026, distinct services EC2 and S3):
+///   Row 1 (EC2): EffectiveCost=650.00, BilledCost=700.00
+///   Row 2 (S3):  EffectiveCost=250.00, BilledCost=300.00
+/// Totals: `FIXTURE_FOCUS10_AMORTIZED_TOTAL_AUG` (900.00) amortized,
+/// `FIXTURE_FOCUS10_BILLED_TOTAL_AUG` (1000.00) billed.
+///
+/// FOCUS 1.0 lacks several FOCUS 1.2 columns (`ServiceSubcategory`,
+/// `AvailabilityZone`, `ResourceName`, `ResourceType`, `ChargeClass`,
+/// `ChargeDescription`, `PricingCategory`, `Tags`, commitment discount
+/// columns, `x_ServiceCode`) — this fixture's column shape matches
+/// `schema_detection::tests::focus10_select` exactly.
+pub fn generate_focus10_fixture(base_dir: &Path) -> Result<(), FixtureError> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch("LOAD parquet;")?;
+
+    let dir = base_dir.join("BILLING_PERIOD=2026-08");
+    fs::create_dir_all(&dir)?;
+    let parquet_path = dir.join("data.parquet");
+    let parquet_str = parquet_path.to_str().unwrap().replace('\\', "/");
+
+    let sql = format!(
+        r#"COPY (
+            SELECT
+                TIMESTAMP '2026-08-01 00:00:00' AS BillingPeriodStart,
+                TIMESTAMP '2026-09-01 00:00:00' AS BillingPeriodEnd,
+                TIMESTAMP '2026-08-10 00:00:00' AS ChargePeriodStart,
+                TIMESTAMP '2026-08-11 00:00:00' AS ChargePeriodEnd,
+                'acct-001'    AS BillingAccountId,
+                'Acct Name'   AS BillingAccountName,
+                'sub-001'     AS SubAccountId,
+                'Sub Name'    AS SubAccountName,
+                'AWS'         AS ProviderName,
+                'Amazon'      AS PublisherName,
+                'EC2'         AS ServiceName,
+                'Compute'     AS ServiceCategory,
+                'us-east-1'   AS RegionName,
+                'i-abc123'    AS ResourceId,
+                'Usage'       AS ChargeCategory,
+                'Recurring'   AS ChargeFrequency,
+                8.0           AS ConsumedQuantity,
+                'Hours'       AS ConsumedUnit,
+                700.00        AS BilledCost,
+                650.00        AS EffectiveCost,
+                750.00        AS ListCost,
+                720.00        AS ContractedCost,
+                'USD'         AS BillingCurrency
+            UNION ALL
+            SELECT
+                TIMESTAMP '2026-08-01 00:00:00',
+                TIMESTAMP '2026-09-01 00:00:00',
+                TIMESTAMP '2026-08-20 00:00:00',
+                TIMESTAMP '2026-08-21 00:00:00',
+                'acct-001', 'Acct Name', 'sub-001', 'Sub Name',
+                'AWS', 'Amazon',
+                'S3', 'Storage',
+                'us-east-1',
+                'bucket-abc',
+                'Usage', 'Recurring',
+                100.0, 'GB',
+                300.00, 250.00, 320.00, 280.00,
+                'USD'
+        ) TO '{parquet_str}' (FORMAT PARQUET)"#,
+        parquet_str = parquet_str
+    );
+    conn.execute_batch(&sql)?;
+
+    let manifest = serde_json::json!({
+        "dataFiles": ["data.parquet"],
+        "billingPeriod": {
+            "start": "2026-08-01T00:00:00Z",
+            "end": "2026-09-01T00:00:00Z"
+        }
+    });
+    fs::write(
+        dir.join("Manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CUR 2.0 golden fixture: 12 scenario rows exercising every branch of the
 // `amortized_cost` CASE expression in `adapters::cur2::register_view`,
@@ -766,6 +859,64 @@ mod tests {
             "sep partial amortized via repository: {} vs {}",
             sep_summary.total,
             FIXTURE_AMORTIZED_TOTAL_SEP_PARTIAL
+        );
+    }
+
+    #[test]
+    fn focus10_fixture_creates_files() {
+        ensure_parquet_installed();
+        let dir = tempfile::tempdir().unwrap();
+        generate_focus10_fixture(dir.path()).unwrap();
+
+        let aug_parquet = dir.path().join("BILLING_PERIOD=2026-08").join("data.parquet");
+        let aug_manifest = dir.path().join("BILLING_PERIOD=2026-08").join("Manifest.json");
+
+        assert!(aug_parquet.exists(), "Aug parquet missing");
+        assert!(aug_manifest.exists(), "Aug manifest missing");
+    }
+
+    #[test]
+    fn focus10_fixture_view_registers_and_golden_totals_match() {
+        use crate::adapters::focus10;
+
+        ensure_parquet_installed();
+        let dir = tempfile::tempdir().unwrap();
+        generate_focus10_fixture(dir.path()).unwrap();
+
+        let aug_path = dir
+            .path()
+            .join("BILLING_PERIOD=2026-08")
+            .join("data.parquet")
+            .to_str()
+            .unwrap()
+            .replace('\\', "/");
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("LOAD parquet;").unwrap();
+        focus10::register_view(&conn, &[aug_path]).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT SUM(billed_cost), SUM(amortized_cost), COUNT(*) FROM normalized_cost")
+            .unwrap();
+        let (billed_total, amortized_total, count): (f64, f64, i64) = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(count, 2, "expected 2 rows (EC2, S3)");
+        assert!(
+            (billed_total - FIXTURE_FOCUS10_BILLED_TOTAL_AUG).abs() < 1e-6,
+            "billed total via view: {} vs {}",
+            billed_total,
+            FIXTURE_FOCUS10_BILLED_TOTAL_AUG
+        );
+        assert!(
+            (amortized_total - FIXTURE_FOCUS10_AMORTIZED_TOTAL_AUG).abs() < 1e-6,
+            "amortized total via view: {} vs {}",
+            amortized_total,
+            FIXTURE_FOCUS10_AMORTIZED_TOTAL_AUG
         );
     }
 
