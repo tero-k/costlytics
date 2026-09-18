@@ -20,7 +20,7 @@ import { getTimeseries, type TimeGranularity, type TimeSeriesPoint } from './api
 import { addDaysIso, daysBetweenIso } from './shared/dates.ts';
 import { formatCurrency, formatCurrencyCompact, errorMessage } from './shared/format.ts';
 import { escapeHtml } from './shared/html.ts';
-import { readControls, type Controls } from './shared/controls.ts';
+import { readControls, subscribeToControls, type Controls } from './shared/controls.ts';
 import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 import { autoGranularity, formatPeriodLabel } from './shared/granularity.ts';
@@ -179,10 +179,7 @@ export function initTrendChart(onCurrency?: (currency: string) => void): Promise
     await loadTrendChart(controls, token, onCurrency);
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
-  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
-  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
-  document.querySelector('#granularity-select')?.addEventListener('change', () => void refresh());
+  subscribeToControls(refresh, { extraIds: ['#granularity-select'] });
 
   return refresh();
 }

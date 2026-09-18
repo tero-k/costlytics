@@ -20,7 +20,7 @@
 import { getCompare, getSummary } from './api.ts';
 import { addDaysIso, previousPeriod } from './shared/dates.ts';
 import { formatCurrency, errorMessage, formatPercent, formatSignedCurrency, changeClass } from './shared/format.ts';
-import { readControls, type Controls } from './shared/controls.ts';
+import { readControls, subscribeToControls, type Controls } from './shared/controls.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 
 // ---------------------------------------------------------------------------
@@ -225,9 +225,7 @@ export function initKpiCards(onCurrency?: (currency: string) => void): Promise<v
     ]);
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
-  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
-  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
+  subscribeToControls(refresh);
 
   return refresh();
 }

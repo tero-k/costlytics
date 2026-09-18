@@ -12,12 +12,31 @@
  * CSV context, e.g. turning a literal `"` into `&quot;` instead of `""`).
  */
 
+/**
+ * Characters that, when leading a cell, are interpreted as the start of a
+ * formula by Excel/Google Sheets/etc. once the file is opened — RFC 4180
+ * quoting does NOT prevent this, since spreadsheet apps strip the
+ * surrounding quotes before evaluating the leading character.
+ */
+const FORMULA_TRIGGER_CHARS = /^[=+\-@\t\r]/;
+
+/**
+ * Neutralizes CSV/formula injection: if `value` starts with a character
+ * that a spreadsheet app would interpret as the start of a formula, prefix
+ * it with a single quote `'`, the standard "force text" convention that
+ * spreadsheet apps recognize and strip on display.
+ */
+function neutralizeFormulaInjection(value: string): string {
+  return FORMULA_TRIGGER_CHARS.test(value) ? `'${value}` : value;
+}
+
 /** Quotes a single CSV field per RFC 4180 if it contains a comma, quote, or newline. */
 export function csvField(value: string): string {
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+  const safe = neutralizeFormulaInjection(value);
+  if (/[",\r\n]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
   }
-  return value;
+  return safe;
 }
 
 /** Joins already-stringified rows (including the header row, if any) into CSV text using CRLF line endings. */

@@ -21,7 +21,7 @@ import { getBreakdown, getSummary, type BreakdownRow, type Dimension } from './a
 import { addDaysIso } from './shared/dates.ts';
 import { formatCurrency, formatCurrencyCompact, errorMessage } from './shared/format.ts';
 import { escapeHtml } from './shared/html.ts';
-import { readControls, type Controls } from './shared/controls.ts';
+import { readControls, subscribeToControls, type Controls } from './shared/controls.ts';
 import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 import { formatKeyLabel } from './shared/labels.ts';
@@ -201,9 +201,7 @@ export function initTopBreakdownCharts(onCurrency?: (currency: string) => void):
     await Promise.allSettled(defs.map((def) => loadChart(def, controls, summaryPromise, token, onCurrency)));
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
-  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
-  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
+  subscribeToControls(refresh);
 
   return refresh();
 }

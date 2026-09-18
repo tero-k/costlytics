@@ -29,7 +29,7 @@ import { formatCurrency, formatCurrencyCompact, errorMessage } from './shared/fo
 import { escapeHtml } from './shared/html.ts';
 import { formatKeyLabel } from './shared/labels.ts';
 import { autoGranularity, formatPeriodLabel } from './shared/granularity.ts';
-import { readExplorerControls, type ExplorerControls } from './shared/controls.ts';
+import { readExplorerControls, subscribeToControls, type ExplorerControls } from './shared/controls.ts';
 import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 
@@ -233,11 +233,7 @@ export function initExplorerTrendChart(onCurrency?: (currency: string) => void):
     await loadTrendChart(controls, token, onCurrency);
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
-  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
-  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
-  document.querySelector('#dimension-select')?.addEventListener('change', () => void refresh());
-  document.querySelector('#top-n-input')?.addEventListener('change', () => void refresh());
+  subscribeToControls(refresh, { explorer: true });
 
   return refresh();
 }

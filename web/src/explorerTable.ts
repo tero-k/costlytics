@@ -29,7 +29,7 @@ import { addDaysIso, previousPeriod } from './shared/dates.ts';
 import { formatCurrency, formatPercent, formatSignedCurrency, changeClass, errorMessage } from './shared/format.ts';
 import { escapeHtml } from './shared/html.ts';
 import { formatKeyLabel } from './shared/labels.ts';
-import { readExplorerControls, type ExplorerControls } from './shared/controls.ts';
+import { readExplorerControls, subscribeToControls, type ExplorerControls } from './shared/controls.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 
 const CONTAINER_ID = 'explorer-table';
@@ -338,11 +338,7 @@ export function initExplorerTable(onCurrency?: (currency: string) => void): Prom
     await loadTable(controls, token, onCurrency);
   };
 
-  document.querySelector('#date-start')?.addEventListener('change', () => void refresh());
-  document.querySelector('#date-end')?.addEventListener('change', () => void refresh());
-  document.querySelector('#metric-select')?.addEventListener('change', () => void refresh());
-  document.querySelector('#dimension-select')?.addEventListener('change', () => void refresh());
-  document.querySelector('#top-n-input')?.addEventListener('change', () => void refresh());
+  subscribeToControls(refresh, { explorer: true });
 
   return refresh();
 }

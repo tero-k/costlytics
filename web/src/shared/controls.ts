@@ -56,3 +56,25 @@ export function readExplorerControls(): ExplorerControls | null {
 
   return { ...base, dimension, topN };
 }
+
+/**
+ * Subscribes `refresh` to `change` events on the shared date/metric
+ * controls (and, for the Cost Explorer page, the dimension/top-N controls
+ * too), so every fetching module doesn't have to repeat its own
+ * `document.querySelector(...)?.addEventListener('change', ...)` block.
+ *
+ * `opts.extraIds` covers page-local controls beyond the shared set (e.g.
+ * the Overview page's `#granularity-select`, used only by `trendChart.ts`).
+ */
+export function subscribeToControls(
+  refresh: () => void,
+  opts?: { explorer?: boolean; extraIds?: string[] },
+): void {
+  const ids = ['#date-start', '#date-end', '#metric-select'];
+  if (opts?.explorer) ids.push('#dimension-select', '#top-n-input');
+  if (opts?.extraIds) ids.push(...opts.extraIds);
+
+  for (const id of ids) {
+    document.querySelector(id)?.addEventListener('change', () => void refresh());
+  }
+}
