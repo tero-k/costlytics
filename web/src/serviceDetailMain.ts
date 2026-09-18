@@ -1,6 +1,8 @@
 import './style.css';
 import { getFilterValues } from './api.ts';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible } from './shared/statusBar.ts';
+import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { initServiceKpi } from './serviceKpi.ts';
+import { initServiceTrend } from './serviceTrend.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Service Detail page.
@@ -113,7 +115,10 @@ function initServicePicker(): void {
  * failure). Empty for now (Task 1); the KPI/trend (Task 2), breakdown
  * (Task 3), and top-resources (Task 4) components register here.
  */
-const refreshers: Array<() => Promise<void>> = [];
+const refreshers: Array<() => Promise<void>> = [
+  () => initServiceKpi(updateStatusCurrency),
+  () => initServiceTrend(updateStatusCurrency),
+];
 
 async function bootstrap(): Promise<void> {
   initDateRangeDefaults();
