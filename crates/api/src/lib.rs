@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::{Datelike, NaiveDate, Utc};
 
 use data::{
-    adapters::{cur2, focus12},
+    adapters::{cur2, focus10, focus12},
     duckdb_pool,
     object_store::{LocalObjectStore, YearMonth},
     queries::summary::{CostRepository, DuckDbCostRepository},
@@ -41,8 +41,8 @@ pub fn default_discovery_range() -> (NaiveDate, NaiveDate) {
 /// For local (non-S3) sources, partition discovery runs eagerly over a broad
 /// default date range (see `default_discovery_range`), using
 /// `data::discovery::discover_partitions` with a `LocalObjectStore`. Discovered
-/// files are schema-detected; sources whose first file is confirmed FOCUS 1.2
-/// or CUR 2.0 get their `normalized_cost` VIEW registered. For S3 sources,
+/// files are schema-detected; sources whose first file is confirmed FOCUS 1.0,
+/// FOCUS 1.2, or CUR 2.0 get their `normalized_cost` VIEW registered. For S3 sources,
 /// startup discovery is skipped entirely; a warning is logged and the source
 /// will be unavailable this session (S3 `ObjectStore` support is out of scope).
 pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router> {
@@ -144,11 +144,21 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                         continue;
                     }
                 }
+                Ok(DetectedSchema::Focus10) => {
+                    if let Err(e) = focus10::register_view(&conn, &files) {
+                        tracing::error!(
+                            source_id = %source.id,
+                            error = %e,
+                            "failed to register normalized_cost view; skipping source"
+                        );
+                        continue;
+                    }
+                }
                 Ok(other) => {
                     tracing::warn!(
                         source_id = %source.id,
                         detected = ?other,
-                        "detected schema is not FOCUS 1.2 or CUR 2.0; only these formats are supported this session, skipping source"
+                        "detected schema is not FOCUS 1.0, FOCUS 1.2, or CUR 2.0; only these formats are supported this session, skipping source"
                     );
                     continue;
                 }
