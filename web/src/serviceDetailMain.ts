@@ -4,6 +4,7 @@ import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updat
 import { initServiceKpi } from './serviceKpi.ts';
 import { initServiceTrend } from './serviceTrend.ts';
 import { initServiceBreakdowns } from './serviceBreakdowns.ts';
+import { initServiceTopResources } from './serviceTopResources.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Service Detail page.
@@ -18,9 +19,10 @@ import { initServiceBreakdowns } from './serviceBreakdowns.ts';
  *
  * The KPI summary / trend chart (Task 2), the account/region/charge-category
  * breakdowns (Task 3, `serviceBreakdowns.ts`), and the top-resources table
- * (Task 4) each register their `init*` function into `refreshers` below,
- * following the same pattern as `main.ts`/`explorerMain.ts`. Each of those components is
- * responsible for reading `#service-picker`'s current value itself (via
+ * (Task 4, `serviceTopResources.ts`) each register their `init*` function
+ * into `refreshers` below, following the same pattern as
+ * `main.ts`/`explorerMain.ts`. Each of those components is responsible for
+ * reading `#service-picker`'s current value itself (via
  * `getSelectedService()`) and treating an unselected service (`null`) as
  * "nothing to fetch yet" rather than querying with an empty/invalid filter.
  */
@@ -113,13 +115,14 @@ function initServicePicker(): void {
 /**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). Empty for now (Task 1); the KPI/trend (Task 2), breakdown
- * (Task 3), and top-resources (Task 4) components register here.
+ * failure). The KPI/trend (Task 2), breakdowns (Task 3), and top-resources
+ * (Task 4) components register here.
  */
 const refreshers: Array<() => Promise<void>> = [
   () => initServiceKpi(updateStatusCurrency),
   () => initServiceTrend(updateStatusCurrency),
   () => initServiceBreakdowns(updateStatusCurrency),
+  () => initServiceTopResources(updateStatusCurrency),
 ];
 
 async function bootstrap(): Promise<void> {
