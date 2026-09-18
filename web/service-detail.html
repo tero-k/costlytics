@@ -3,18 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Costlytics</title>
+    <title>Costlytics — Service Detail</title>
   </head>
   <body>
     <div id="app">
       <header class="app-header">
         <h1>Costlytics</h1>
         <nav class="app-nav">
-          <a href="/" class="active">Overview</a>
+          <a href="/">Overview</a>
           <a href="/explorer.html">Cost Explorer</a>
-          <a href="/service-detail.html">Service Detail</a>
+          <a href="/service-detail.html" class="active">Service Detail</a>
         </nav>
         <div class="controls">
+          <label class="control">
+            <span>Service</span>
+            <select id="service-picker">
+              <option value="" selected>Select a service&hellip;</option>
+            </select>
+          </label>
           <label class="control">
             <span>From</span>
             <input type="date" id="date-start" />
@@ -43,38 +49,15 @@
         <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
       </div>
       <main>
-        <div id="overview"></div>
-        <section class="chart-section">
-          <div class="chart-header">
-            <h2>Cost trend</h2>
-            <label class="control">
-              <span>Granularity</span>
-              <select id="granularity-select">
-                <option value="auto" selected>Auto</option>
-                <option value="day">Day</option>
-                <option value="month">Month</option>
-                <option value="year">Year</option>
-              </select>
-            </label>
-          </div>
-          <div class="chart-area" id="trend-chart"></div>
-        </section>
-        <section class="top-breakdown-grid">
-          <div class="chart-section">
-            <div class="chart-header">
-              <h2>Top services</h2>
-            </div>
-            <div class="chart-area" id="top-services"></div>
-          </div>
-          <div class="chart-section">
-            <div class="chart-header">
-              <h2>Top accounts</h2>
-            </div>
-            <div class="chart-area" id="top-accounts"></div>
-          </div>
-        </section>
+        <div class="table-status" id="service-detail-placeholder">Select a service to view details.</div>
+        <div id="service-kpi"></div>
+        <div id="service-trend"></div>
+        <div id="service-by-account"></div>
+        <div id="service-by-region"></div>
+        <div id="service-by-category"></div>
+        <div id="service-top-resources"></div>
       </main>
     </div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/serviceDetailMain.ts"></script>
   </body>
 </html>
