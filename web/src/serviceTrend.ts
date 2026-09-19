@@ -19,7 +19,7 @@
  */
 
 import { getTimeseries, type TimeGranularity, type TimeSeriesPoint } from './api.ts';
-import { getSelectedService } from './serviceDetailMain.ts';
+import { getSelectedService } from './shared/servicePicker.ts';
 import { addDaysIso, daysBetweenIso } from './shared/dates.ts';
 import { formatCurrency, formatCurrencyCompact, errorMessage } from './shared/format.ts';
 import { escapeHtml } from './shared/html.ts';

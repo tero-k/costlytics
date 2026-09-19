@@ -22,15 +22,16 @@
  * to fetch yet" convention (see `serviceDetailMain.ts`).
  */
 
-import { getBreakdown, getSummary, type BreakdownRow, type Dimension } from './api.ts';
-import { getSelectedService } from './serviceDetailMain.ts';
+import { getBreakdown, getSummary, type Dimension } from './api.ts';
+import { getSelectedService } from './shared/servicePicker.ts';
 import { addDaysIso } from './shared/dates.ts';
-import { formatCurrency, formatCurrencyCompact, errorMessage } from './shared/format.ts';
+import { errorMessage } from './shared/format.ts';
 import { escapeHtml } from './shared/html.ts';
 import { readControls, subscribeToControls, type Controls } from './shared/controls.ts';
-import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
+import { clearOverlays, showOverlay } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
-import { formatKeyLabel } from './shared/labels.ts';
+import { buildRowsWithOther } from './shared/otherBucket.ts';
+import { renderHorizontalBarChart } from './shared/horizontalBarChart.ts';
 
 // ---------------------------------------------------------------------------
 // Config: one entry per chart, each with its own RequestGuard
@@ -54,9 +55,6 @@ const CHART_DEFS: ChartDef[] = [
   },
 ];
 
-/** Below this fraction of the service's overall total, the "Other" bucket is omitted as negligible. */
-const OTHER_EPSILON_FRACTION = 0.001;
-
 // ---------------------------------------------------------------------------
 // Chart state / DOM helpers
 // ---------------------------------------------------------------------------
@@ -77,29 +75,6 @@ function renderShell(def: ChartDef, container: HTMLElement): void {
       </div>
       <div class="chart-area" id="${def.containerId}-chart"></div>
     </section>`;
-}
-
-/**
- * Combines a top-N breakdown's rows with an overall (unfiltered-by-dimension)
- * total into the row list a horizontal bar chart should render, adding a
- * synthetic "Other" row for the remainder when it's non-trivial. Pulled out
- * as a pure helper (rather than repeated inline in `loadChart` for each of
- * the three dimensions) since this task applies the exact same computation
- * three times within this one module.
- */
-function buildRowsWithOther(rows: BreakdownRow[], overallTotal: number): Array<{ label: string; total: number }> {
-  const result: Array<{ label: string; total: number }> = rows.map((row) => ({
-    label: formatKeyLabel(row.key),
-    total: row.total,
-  }));
-
-  const sumOfRows = rows.reduce((acc, row) => acc + row.total, 0);
-  const remainder = overallTotal - sumOfRows;
-  if (remainder > overallTotal * OTHER_EPSILON_FRACTION) {
-    result.push({ label: 'Other', total: remainder });
-  }
-
-  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,75 +121,11 @@ async function loadChart(
     onCurrency?.(breakdown.currency);
 
     const rows = buildRowsWithOther(breakdown.rows, summary.total);
-    renderChart(def.containerId, chartArea, rows, breakdown.currency);
+    renderHorizontalBarChart(`${def.containerId}-chart`, chartArea, rows, breakdown.currency);
   } catch (err) {
     if (!def.guard.isCurrent(token)) return;
     showOverlay(def.containerId, chartArea, 'chart-error', errorMessage(err));
   }
-}
-
-function renderChart(
-  containerId: string,
-  chartArea: HTMLElement,
-  rows: Array<{ label: string; total: number }>,
-  currency: string,
-): void {
-  const instance = ensureChart(`${containerId}-chart`, chartArea);
-
-  // ECharts renders horizontal bar category axes bottom-to-top, so reverse
-  // to keep the highest-cost row at the top of the chart.
-  const reversed = [...rows].reverse();
-  const categories = reversed.map((row) => row.label);
-  const totals = reversed.map((row) => row.total);
-
-  instance.setOption(
-    {
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'shadow' },
-        formatter: (params: unknown) => {
-          const items = Array.isArray(params) ? params : [params];
-          const first = items[0] as { dataIndex: number } | undefined;
-          if (!first) return '';
-          const row = reversed[first.dataIndex];
-          if (!row) return '';
-          // `row.label` traces back to `breakdown()`'s `key` field, i.e.
-          // real cost-data values (account/region/charge-category names) —
-          // escape before interpolating into the HTML `tooltip` formatter
-          // returns (ECharts' default `renderMode: 'html'` does not escape
-          // it for us).
-          return [`<strong>${escapeHtml(row.label)}</strong>`, formatCurrency(row.total, currency)].join('<br/>');
-        },
-      },
-      grid: {
-        left: 8,
-        right: 24,
-        top: 16,
-        bottom: 8,
-        containLabel: true,
-      },
-      xAxis: {
-        type: 'value',
-        axisLabel: {
-          formatter: (value: number) => formatCurrencyCompact(value, currency),
-        },
-      },
-      yAxis: {
-        type: 'category',
-        data: categories,
-      },
-      series: [
-        {
-          type: 'bar',
-          data: totals,
-          itemStyle: {
-            borderRadius: [0, 4, 4, 0],
-          },
-        },
-      ],
-    },
-    true,
-  );
 }
 
 // ---------------------------------------------------------------------------

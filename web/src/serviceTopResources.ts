@@ -22,7 +22,7 @@
  */
 
 import { getBreakdown, type BreakdownRow } from './api.ts';
-import { getSelectedService } from './serviceDetailMain.ts';
+import { getSelectedService } from './shared/servicePicker.ts';
 import { addDaysIso } from './shared/dates.ts';
 import { formatCurrency, errorMessage } from './shared/format.ts';
 import { escapeHtml } from './shared/html.ts';

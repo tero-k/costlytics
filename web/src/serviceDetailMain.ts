@@ -1,6 +1,7 @@
 import './style.css';
 import { getFilterValues } from './api.ts';
 import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { initServicePicker, populateServicePickerOptions } from './shared/servicePicker.ts';
 import { initServiceKpi } from './serviceKpi.ts';
 import { initServiceTrend } from './serviceTrend.ts';
 import { initServiceBreakdowns } from './serviceBreakdowns.ts';
@@ -23,35 +24,13 @@ import { initServiceTopResources } from './serviceTopResources.ts';
  * into `refreshers` below, following the same pattern as
  * `main.ts`/`explorerMain.ts`. Each of those components is responsible for
  * reading `#service-picker`'s current value itself (via
- * `getSelectedService()`) and treating an unselected service (`null`) as
- * "nothing to fetch yet" rather than querying with an empty/invalid filter.
+ * `getSelectedService()`, imported from `shared/servicePicker.ts`) and
+ * treating an unselected service (`null`) as "nothing to fetch yet" rather
+ * than querying with an empty/invalid filter.
  */
-
-const SERVICE_PARAM = 'service';
 
 function getServicePicker(): HTMLSelectElement | null {
   return document.querySelector<HTMLSelectElement>('#service-picker');
-}
-
-/**
- * Currently selected service, or `null` if the placeholder ("Select a
- * service…") option is selected. Later tasks' components read this (or
- * re-implement the same one-line read against `#service-picker`) rather
- * than tracking selection state separately.
- */
-export function getSelectedService(): string | null {
-  const value = getServicePicker()?.value;
-  return value ? value : null;
-}
-
-function updateUrlParam(service: string | null): void {
-  const url = new URL(window.location.href);
-  if (service) {
-    url.searchParams.set(SERVICE_PARAM, service);
-  } else {
-    url.searchParams.delete(SERVICE_PARAM);
-  }
-  window.history.replaceState(null, '', url);
 }
 
 function updatePlaceholderVisibility(service: string | null): void {
@@ -61,13 +40,12 @@ function updatePlaceholderVisibility(service: string | null): void {
 
 /**
  * Populates `#service-picker` from `getFilterValues('services')`, sorted
- * alphabetically. Honors a `?service=` URL query parameter if it names a
- * service present in the fetched list, so a shared/bookmarked URL
- * round-trips back to the same selection; otherwise defaults to the first
- * service once the list loads. On fetch failure (or an empty list) the
- * picker is left showing only its placeholder option and the "select a
- * service" message stays visible, rather than any component attempting to
- * fetch with an empty/invalid service filter.
+ * alphabetically, via `shared/servicePicker.ts`'s
+ * `populateServicePickerOptions` (which honors a `?service=` URL query
+ * parameter and otherwise defaults to the first service). On fetch failure
+ * (or an empty list) the picker is left showing only its placeholder option
+ * and the "select a service" message stays visible, rather than any
+ * component attempting to fetch with an empty/invalid service filter.
  */
 async function populateServicePicker(): Promise<void> {
   const picker = getServicePicker();
@@ -82,34 +60,8 @@ async function populateServicePicker(): Promise<void> {
   }
 
   const sorted = [...services].sort((a, b) => a.localeCompare(b));
-
-  const fragment = document.createDocumentFragment();
-  for (const service of sorted) {
-    const option = document.createElement('option');
-    option.value = service;
-    option.textContent = service;
-    fragment.appendChild(option);
-  }
-  picker.appendChild(fragment);
-
-  const requested = new URL(window.location.href).searchParams.get(SERVICE_PARAM);
-  const initial = requested && sorted.includes(requested) ? requested : (sorted[0] ?? null);
-
-  picker.value = initial ?? '';
-  updateUrlParam(initial);
+  const initial = populateServicePickerOptions(sorted);
   updatePlaceholderVisibility(initial);
-}
-
-/** Keeps the URL query param and placeholder message in sync with the user's picker selection. */
-function initServicePicker(): void {
-  const picker = getServicePicker();
-  if (!picker) return;
-
-  picker.addEventListener('change', () => {
-    const service = getSelectedService();
-    updateUrlParam(service);
-    updatePlaceholderVisibility(service);
-  });
 }
 
 /**
@@ -128,7 +80,7 @@ const refreshers: Array<() => Promise<void>> = [
 async function bootstrap(): Promise<void> {
   initDateRangeDefaults();
   initStatusBar();
-  initServicePicker();
+  initServicePicker(updatePlaceholderVisibility);
 
   setLoadingIndicatorVisible(true);
   try {

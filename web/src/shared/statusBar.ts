@@ -62,8 +62,16 @@ function updateStatusRangeAndMetric(): void {
   }
 }
 
-/** Set once the first successful API response reports a currency; stays displayed across later refreshes. */
+/**
+ * Set once the first successful API response reports a currency; stays
+ * displayed across later refreshes. A falsy/empty `currency` (e.g. a
+ * zero-row query result, whose `currency` field comes back as `""`) is
+ * ignored rather than blanking out whatever was last shown — otherwise
+ * switching to a service/range with no data would wipe a previously known
+ * currency from the status bar.
+ */
 export function updateStatusCurrency(currency: string): void {
+  if (!currency) return;
   const currencyEl = document.querySelector<HTMLElement>('#status-currency');
   if (currencyEl) currencyEl.textContent = `Currency: ${currency}`;
 }
