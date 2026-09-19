@@ -1,11 +1,11 @@
 import './style.css';
 import { getFilterValues } from './api.ts';
 import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
-import { initServicePicker, populateServicePickerOptions } from './shared/servicePicker.ts';
-import { initServiceKpi } from './serviceKpi.ts';
-import { initServiceTrend } from './serviceTrend.ts';
+import { initServicePicker, populateServicePickerOptions, serviceEntityConfig } from './shared/servicePicker.ts';
+import { initEntityKpi } from './entityKpi.ts';
+import { initEntityTrend } from './entityTrend.ts';
 import { initServiceBreakdowns } from './serviceBreakdowns.ts';
-import { initServiceTopResources } from './serviceTopResources.ts';
+import { initEntityTopResources } from './entityTopResources.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Service Detail page.
@@ -18,15 +18,18 @@ import { initServiceTopResources } from './serviceTopResources.ts';
  * `#date-start`/`#date-end`/`#metric-select` (see `subscribeToControls`'s
  * `extraIds` option).
  *
- * The KPI summary / trend chart (Task 2), the account/region/charge-category
- * breakdowns (Task 3, `serviceBreakdowns.ts`), and the top-resources table
- * (Task 4, `serviceTopResources.ts`) each register their `init*` function
- * into `refreshers` below, following the same pattern as
+ * The KPI summary / trend chart / top-resources table are the generic
+ * `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts` components
+ * (Session 11), each instantiated here for "service" via
+ * `shared/servicePicker.ts`'s `serviceEntityConfig`. The
+ * account/region/charge-category breakdowns (`serviceBreakdowns.ts`) remain
+ * service-specific for now (Task 3's job). Each component registers its
+ * `init*` call into `refreshers` below, following the same pattern as
  * `main.ts`/`explorerMain.ts`. Each of those components is responsible for
  * reading `#service-picker`'s current value itself (via
- * `getSelectedService()`, imported from `shared/servicePicker.ts`) and
- * treating an unselected service (`null`) as "nothing to fetch yet" rather
- * than querying with an empty/invalid filter.
+ * `serviceEntityConfig.getSelected`, i.e. `getSelectedService()` from
+ * `shared/servicePicker.ts`) and treating an unselected service (`null`) as
+ * "nothing to fetch yet" rather than querying with an empty/invalid filter.
  */
 
 function getServicePicker(): HTMLSelectElement | null {
@@ -67,14 +70,14 @@ async function populateServicePicker(): Promise<void> {
 /**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). The KPI/trend (Task 2), breakdowns (Task 3), and top-resources
- * (Task 4) components register here.
+ * failure). The generic KPI/trend/top-resources components and the
+ * service-specific breakdowns component register here.
  */
 const refreshers: Array<() => Promise<void>> = [
-  () => initServiceKpi(updateStatusCurrency),
-  () => initServiceTrend(updateStatusCurrency),
+  () => initEntityKpi(serviceEntityConfig, updateStatusCurrency),
+  () => initEntityTrend(serviceEntityConfig, updateStatusCurrency),
   () => initServiceBreakdowns(updateStatusCurrency),
-  () => initServiceTopResources(updateStatusCurrency),
+  () => initEntityTopResources(serviceEntityConfig, updateStatusCurrency),
 ];
 
 async function bootstrap(): Promise<void> {

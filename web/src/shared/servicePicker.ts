@@ -13,6 +13,7 @@
  */
 
 import { createDimensionPicker } from './dimensionPicker.ts';
+import type { EntityConfig } from './entityConfig.ts';
 
 const servicePicker = createDimensionPicker({ paramName: 'service', elementId: 'service-picker' });
 
@@ -40,3 +41,17 @@ export const populateServicePickerOptions = servicePicker.populateOptions;
 
 /** Wires `#service-picker`'s `change` event to sync the URL param and notify `onChange`. */
 export const initServicePicker = servicePicker.init;
+
+/**
+ * {@link EntityConfig} instantiation for the Service Detail page, consumed by
+ * the generic `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts`
+ * components (via `serviceDetailMain.ts`) so they can fetch/filter/render for
+ * "service" without any service-specific code of their own.
+ */
+export const serviceEntityConfig: EntityConfig = {
+  entityNoun: 'service',
+  idPrefix: 'service',
+  filterKey: 'services',
+  pickerSelector: '#service-picker',
+  getSelected: getSelectedService,
+};
