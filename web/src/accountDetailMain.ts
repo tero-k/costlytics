@@ -4,6 +4,7 @@ import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updat
 import { initAccountPicker, populateAccountPickerOptions } from './shared/accountPicker.ts';
 import { initAccountKpi } from './accountKpi.ts';
 import { initAccountTrend } from './accountTrend.ts';
+import { initAccountBreakdowns } from './accountBreakdowns.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Account Detail page.
@@ -21,12 +22,10 @@ import { initAccountTrend } from './accountTrend.ts';
  * `crates/data/src/queries/summary.rs`): there is no display-name concept in
  * the backend yet, so this page doesn't invent one.
  *
- * This is a page shell only (Task 1): the KPI summary/trend chart, the
- * service/region breakdowns, and the top-resources table are left as empty
- * placeholder `div`s (`#account-kpi`, `#account-trend`,
- * `#account-by-service`, `#account-by-region`, `#account-top-resources`) for
- * later tasks to fill in, following `serviceDetailMain.ts`'s `refreshers`
- * pattern once those components exist.
+ * The KPI summary/trend chart (Task 2) and the service/region breakdowns
+ * (Task 3) are wired in below via the `refreshers` list; the top-resources
+ * table (`#account-top-resources`) is left as an empty placeholder `div` for
+ * a later task, following `serviceDetailMain.ts`'s `refreshers` pattern.
  */
 
 function getAccountPicker(): HTMLSelectElement | null {
@@ -66,13 +65,14 @@ async function populateAccountPicker(): Promise<void> {
 /**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). The KPI/trend (Task 2) are registered here; the breakdowns and
- * top-resources components register here in later tasks, following
- * `serviceDetailMain.ts`'s `refreshers` pattern.
+ * failure). The KPI/trend (Task 2) and service/region breakdowns (Task 3)
+ * are registered here; the top-resources component registers here in a
+ * later task, following `serviceDetailMain.ts`'s `refreshers` pattern.
  */
 const refreshers: Array<() => Promise<void>> = [
   () => initAccountKpi(updateStatusCurrency),
   () => initAccountTrend(updateStatusCurrency),
+  () => initAccountBreakdowns(updateStatusCurrency),
 ];
 
 async function bootstrap(): Promise<void> {
