@@ -19,15 +19,17 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      // Three pages: the Overview dashboard (`index.html`), the Cost
-      // Explorer (`explorer.html`), and the Service Detail drilldown
-      // (`service-detail.html`), sharing the same shared/ modules and
+      // Four pages: the Overview dashboard (`index.html`), the Cost
+      // Explorer (`explorer.html`), the Service Detail drilldown
+      // (`service-detail.html`), and the Account Detail drilldown
+      // (`account-detail.html`), sharing the same shared/ modules and
       // stylesheet. Vite's default single-entry build only picks up
-      // `index.html`, so all three must be listed explicitly here.
+      // `index.html`, so all four must be listed explicitly here.
       input: {
         index: resolve(rootDir, 'index.html'),
         explorer: resolve(rootDir, 'explorer.html'),
         serviceDetail: resolve(rootDir, 'service-detail.html'),
+        accountDetail: resolve(rootDir, 'account-detail.html'),
       },
     },
   },
