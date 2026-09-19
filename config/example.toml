@@ -3,6 +3,12 @@ host = "127.0.0.1"
 port = 3000
 
 [[sources]]
+id = "local-demo"
+name = "Local demo fixture (wide, for frontend dev)"
+s3_uri = "fixtures/demo"
+source_type = "focus12"
+
+[[sources]]
 id = "local-focus12"
 name = "Local FOCUS 1.2 fixture"
 s3_uri = "fixtures/focus12"
@@ -13,9 +19,3 @@ id = "local-cur2"
 name = "Local CUR 2.0 fixture"
 s3_uri = "fixtures/cur2"
 source_type = "cur2"
-
-[[sources]]
-id = "local-demo"
-name = "Local demo fixture (wide, for frontend dev)"
-s3_uri = "fixtures/demo"
-source_type = "focus12"

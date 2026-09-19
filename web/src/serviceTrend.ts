@@ -176,6 +176,7 @@ export function initServiceTrend(onCurrency?: (currency: string) => void): Promi
   const refresh = async (): Promise<void> => {
     const service = getSelectedService();
     if (!service) {
+      refreshGuard.next();
       // Clear any previously rendered chart in place, rather than tearing
       // down and rebuilding the `.chart-area` DOM node on every deselect —
       // `ensureChart`'s instance cache is keyed by container id and would

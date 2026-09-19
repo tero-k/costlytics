@@ -138,6 +138,7 @@ export function initAccountTopResources(onCurrency?: (currency: string) => void)
   const refresh = async (): Promise<void> => {
     const account = getSelectedAccount();
     if (!account) {
+      refreshGuard.next();
       renderMessage(container, 'table-empty', 'Select an account to view top resources.');
       return;
     }

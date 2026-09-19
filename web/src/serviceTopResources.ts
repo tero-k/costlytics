@@ -137,6 +137,7 @@ export function initServiceTopResources(onCurrency?: (currency: string) => void)
   const refresh = async (): Promise<void> => {
     const service = getSelectedService();
     if (!service) {
+      refreshGuard.next();
       renderMessage(container, 'table-empty', 'Select a service to view top resources.');
       return;
     }

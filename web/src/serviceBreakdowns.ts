@@ -145,6 +145,7 @@ export function initServiceBreakdowns(onCurrency?: (currency: string) => void): 
     const service = getSelectedService();
     if (!service) {
       for (const def of defs) {
+        def.guard.next();
         const chartArea = getChartArea(def.containerId);
         if (chartArea) {
           showOverlay(def.containerId, chartArea, 'chart-empty', 'Select a service to view this breakdown.');

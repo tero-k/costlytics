@@ -141,6 +141,7 @@ export function initAccountBreakdowns(onCurrency?: (currency: string) => void): 
     const account = getSelectedAccount();
     if (!account) {
       for (const def of defs) {
+        def.guard.next();
         const chartArea = getChartArea(def.containerId);
         if (chartArea) {
           showOverlay(def.containerId, chartArea, 'chart-empty', 'Select an account to view this breakdown.');

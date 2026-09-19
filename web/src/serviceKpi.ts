@@ -130,6 +130,7 @@ export function initServiceKpi(onCurrency?: (currency: string) => void): Promise
   const refresh = async (): Promise<void> => {
     const service = getSelectedService();
     if (!service) {
+      refreshGuard.next();
       renderShell(container);
       return;
     }

@@ -131,6 +131,7 @@ export function initAccountKpi(onCurrency?: (currency: string) => void): Promise
   const refresh = async (): Promise<void> => {
     const account = getSelectedAccount();
     if (!account) {
+      refreshGuard.next();
       renderShell(container);
       return;
     }
