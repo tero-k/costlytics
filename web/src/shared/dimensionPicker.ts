@@ -1,9 +1,8 @@
 /**
- * Generic entity-picker state/URL-sync logic shared by the Service Detail and
- * Account Detail pages' entry points (`serviceDetailMain.ts` /
- * `accountDetailMain.ts`) and their leaf components (`serviceKpi.ts`,
- * `serviceTrend.ts`, `serviceBreakdowns.ts`, `serviceTopResources.ts` and
- * their Account Detail counterparts).
+ * Generic entity-picker state/URL-sync logic used by the Service Detail and
+ * Account Detail pages' generic orchestrator (`entityDetailMain.ts`'s
+ * `bootstrapEntityDetailPage`), which builds one `DimensionPicker` instance
+ * per page from its `EntityDetailPageConfig`.
  *
  * Generalized from the original `servicePicker.ts` (Session 9, reviewed
  * twice) once a second page needed the exact same "select an entity from a
@@ -15,16 +14,16 @@
  * (e.g. `createDimensionPicker({ paramName: 'service', elementId:
  * 'service-picker' })`) rather than sharing module-level state, so the two
  * pickers' selections/URL params can never cross-contaminate even if both
- * modules were ever imported into the same page.
+ * were ever active on the same page.
  *
- * Pulled out of `serviceDetailMain.ts` (rather than the leaf components
- * importing a picker accessor from there directly) to break the only import
- * cycle in the frontend: `serviceDetailMain.ts` imports all four leaf modules
- * (to register their `init*` functions as refreshers) AND has a top-level
- * `void bootstrap()` side effect, so a leaf module importing anything from it
- * — even just a hoisted function declaration — pulls the whole page's
- * bootstrap logic into that leaf's dependency graph and makes it untestable
- * in isolation.
+ * Session 11 Task 4 deleted the thin per-page wrapper modules
+ * (`shared/servicePicker.ts`/`shared/accountPicker.ts`) that used to
+ * re-export a `createDimensionPicker` instance's functions under
+ * page-specific names: once every leaf component took a generic
+ * `EntityConfig` instead of importing page-specific accessor functions
+ * directly, those wrappers had no remaining callers besides each page's
+ * `*DetailMain.ts`, which now calls `createDimensionPicker` itself (via
+ * `entityDetailMain.ts`) instead.
  */
 
 export interface DimensionPickerConfig {

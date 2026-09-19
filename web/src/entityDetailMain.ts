@@ -1,0 +1,121 @@
+import { getFilterValues } from './api.ts';
+import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { createDimensionPicker } from './shared/dimensionPicker.ts';
+import { initEntityKpi } from './entityKpi.ts';
+import { initEntityTrend } from './entityTrend.ts';
+import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
+import { initEntityTopResources } from './entityTopResources.ts';
+import type { EntityConfig, EntityFilterKey } from './shared/entityConfig.ts';
+
+/**
+ * Generic app shell / orchestrator for a "detail page" entity (plan §26) —
+ * Service Detail and Account Detail (Session 11 Task 4). Both pages'
+ * `*DetailMain.ts` entry points are now just a `BreakdownDef[]` plus a call
+ * to {@link bootstrapEntityDetailPage} with this config; a future Tags
+ * drilldown page adds a THIRD such call, not a fifth near-copy of this file.
+ *
+ * Subsumes what used to be each page's own bootstrap function AND its
+ * `shared/servicePicker.ts`/`shared/accountPicker.ts` wrapper (both deleted
+ * in this session): this module builds its own `DimensionPicker` directly
+ * from `shared/dimensionPicker.ts`'s `createDimensionPicker` and its own
+ * `EntityConfig` from the same handful of primitives (`paramName`,
+ * `elementId`, `filterKey`, `entityNoun`, `idPrefix`), since nothing else in
+ * the codebase imports those two picker modules anymore now that the KPI /
+ * trend / breakdowns / top-resources components all take a generic
+ * `EntityConfig` rather than page-specific accessor functions.
+ *
+ * Mirrors `explorerMain.ts`'s/`main.ts`'s bootstrap pattern (shared status
+ * bar / date-range defaults, an `allSettled`-based initial-load indicator),
+ * plus this page family's own entity picker: populated from
+ * `getFilterValues(config.filterKey)`, synced to a `?{paramName}=` URL query
+ * parameter (so the page is linkable/bookmarkable), and treated as an extra
+ * shared control alongside `#date-start`/`#date-end`/`#metric-select` (via
+ * each generic component's `subscribeToControls(..., { extraIds: [...] })`).
+ *
+ * Each generic component is responsible for reading `config.getSelected()`
+ * itself and treating an unselected entity (`null`) as "nothing to fetch
+ * yet" rather than querying with an empty/invalid filter.
+ */
+export interface EntityDetailPageConfig {
+  /** URL query parameter name, e.g. `'service'` -> `?service=EC2`. */
+  paramName: string;
+  /** DOM id of the entity `<select>`, e.g. `'service-picker'`. */
+  elementId: string;
+  /** DOM id of the "select an entity" placeholder element, hidden once one is selected. */
+  placeholderId: string;
+  /** `FilterFields` key to populate with `[selected]` on `/cost/*` requests, and the `getFilterValues` dimension to populate the picker from. */
+  filterKey: EntityFilterKey;
+  /** Lowercase singular noun for this entity, used in user-facing copy. */
+  entityNoun: string;
+  /** DOM id prefix for this page's per-entity component containers. */
+  idPrefix: string;
+  /** This page's breakdown-by-dimension charts, e.g. Service Detail's account/region/charge_category vs. Account Detail's service/region. */
+  breakdowns: BreakdownDef[];
+}
+
+/**
+ * Bootstraps a detail page for the given entity config: wires the shared
+ * status bar / date-range defaults, the entity picker (populate, URL
+ * round-trip, change handling), and the four generic leaf components (KPI,
+ * trend, breakdowns, top-resources), then resolves once their initial load
+ * has settled (success or failure).
+ */
+export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig): Promise<void> {
+  const picker = createDimensionPicker({ paramName: config.paramName, elementId: config.elementId });
+
+  const entityConfig: EntityConfig = {
+    entityNoun: config.entityNoun,
+    idPrefix: config.idPrefix,
+    filterKey: config.filterKey,
+    pickerSelector: `#${config.elementId}`,
+    getSelected: picker.getSelected,
+  };
+
+  function updatePlaceholderVisibility(selected: string | null): void {
+    const placeholder = document.querySelector<HTMLElement>(`#${config.placeholderId}`);
+    if (placeholder) placeholder.hidden = selected !== null;
+  }
+
+  /**
+   * Populates the picker from `getFilterValues(config.filterKey)`, sorted
+   * alphabetically. On fetch failure (or an empty list) the picker is left
+   * showing only its placeholder option and the "select an entity" message
+   * stays visible, rather than any component attempting to fetch with an
+   * empty/invalid filter.
+   */
+  async function populatePicker(): Promise<void> {
+    const el = document.querySelector<HTMLSelectElement>(`#${config.elementId}`);
+    if (!el) return;
+
+    let values: string[];
+    try {
+      values = await getFilterValues(config.filterKey);
+    } catch {
+      updatePlaceholderVisibility(null);
+      return;
+    }
+
+    const sorted = [...values].sort((a, b) => a.localeCompare(b));
+    const initial = picker.populateOptions(sorted);
+    updatePlaceholderVisibility(initial);
+  }
+
+  const refreshers: Array<() => Promise<void>> = [
+    () => initEntityKpi(entityConfig, updateStatusCurrency),
+    () => initEntityTrend(entityConfig, updateStatusCurrency),
+    () => initEntityBreakdowns(entityConfig, config.breakdowns, updateStatusCurrency),
+    () => initEntityTopResources(entityConfig, updateStatusCurrency),
+  ];
+
+  initDateRangeDefaults();
+  initStatusBar();
+  picker.init(updatePlaceholderVisibility);
+
+  setLoadingIndicatorVisible(true);
+  try {
+    await populatePicker();
+    await Promise.allSettled(refreshers.map((refresh) => refresh()));
+  } finally {
+    setLoadingIndicatorVisible(false);
+  }
+}

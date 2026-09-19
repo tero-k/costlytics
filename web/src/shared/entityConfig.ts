@@ -8,14 +8,16 @@
  * `accounts`, `#service-picker` -> `#account-picker`, etc.). This type
  * captures exactly those substitution points so the three generic modules
  * can be written once and instantiated per entity, the same way
- * `dimensionPicker.ts` generalized `servicePicker.ts`/`accountPicker.ts`.
+ * `dimensionPicker.ts` generalized the original `servicePicker.ts`.
  *
- * Each entity-specific picker module (`shared/servicePicker.ts`,
- * `shared/accountPicker.ts`) exports its own `EntityConfig` value (e.g.
- * `serviceEntityConfig`) alongside its `DimensionPicker` functions, so the
- * page's `*DetailMain.ts` and the generic components import one object per
- * entity rather than wiring up several loose strings/functions at each call
- * site.
+ * As of Session 11 Task 4, each page's `EntityConfig` is built inline by the
+ * generic `entityDetailMain.ts`'s `bootstrapEntityDetailPage` from its
+ * `EntityDetailPageConfig` (which supplies `entityNoun`/`idPrefix`/
+ * `filterKey`/`paramName`/`elementId`), rather than being exported by a
+ * page-specific picker wrapper module (the now-deleted
+ * `shared/servicePicker.ts`/`shared/accountPicker.ts`) — one fewer file per
+ * page, since `dimensionPicker.ts`'s `createDimensionPicker` already covers
+ * the URL/DOM wiring those wrappers used to re-export.
  */
 
 /** Request-body filter key from `FilterFields` (`api.ts`) this entity filters cost queries on. */

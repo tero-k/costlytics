@@ -1,106 +1,31 @@
 import './style.css';
-import { getFilterValues } from './api.ts';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
-import { initAccountPicker, populateAccountPickerOptions, accountEntityConfig } from './shared/accountPicker.ts';
-import { initEntityKpi } from './entityKpi.ts';
-import { initEntityTrend } from './entityTrend.ts';
-import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
-import { initEntityTopResources } from './entityTopResources.ts';
+import { bootstrapEntityDetailPage } from './entityDetailMain.ts';
+import type { BreakdownDef } from './entityBreakdowns.ts';
 
 /**
- * App shell / orchestrator for the Costlytics Account Detail page.
- *
- * Mirrors `serviceDetailMain.ts`'s bootstrap pattern (shared status bar /
- * date-range defaults, an `allSettled`-based initial-load indicator), plus
- * this page's own `#account-picker`: populated from `getFilterValues`,
- * synced to a `?account=` URL query parameter (so the page is
- * linkable/bookmarkable), via the generalized `shared/dimensionPicker.ts`
- * (instantiated for this page as `shared/accountPicker.ts`) — the same
- * pattern `serviceDetailMain.ts` uses for `#service-picker`.
+ * Entry point for the Costlytics Account Detail page. All orchestration
+ * logic (status bar, picker wiring, the four generic leaf components) lives
+ * in the generic `entityDetailMain.ts`'s `bootstrapEntityDetailPage` — this
+ * file is just this page's config: which URL param / DOM ids to use, and its
+ * breakdown dimensions (plan §26: cost by service and by region — two
+ * charts, no charge-category breakdown for accounts).
  *
  * Account values are rendered plainly (raw `account_id` strings, as
  * `getFilterValues('accounts')` / `distinct_accounts` currently return — see
  * `crates/data/src/queries/summary.rs`): there is no display-name concept in
  * the backend yet, so this page doesn't invent one.
- *
- * The KPI summary / trend chart / top-resources table / breakdowns are all
- * the generic `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts`/
- * `entityBreakdowns.ts` components (Session 11), each instantiated here for
- * "account" via `shared/accountPicker.ts`'s `accountEntityConfig` — mirrors
- * `serviceDetailMain.ts`'s use of `serviceEntityConfig`. The breakdowns list
- * (service, region — no charge-category breakdown here) is this page's own
- * `ACCOUNT_BREAKDOWNS` below.
- */
-
-function getAccountPicker(): HTMLSelectElement | null {
-  return document.querySelector<HTMLSelectElement>('#account-picker');
-}
-
-function updatePlaceholderVisibility(account: string | null): void {
-  const placeholder = document.querySelector<HTMLElement>('#account-detail-placeholder');
-  if (placeholder) placeholder.hidden = account !== null;
-}
-
-/**
- * Populates `#account-picker` from `getFilterValues('accounts')`, sorted
- * alphabetically, via `shared/accountPicker.ts`'s
- * `populateAccountPickerOptions` (which honors a `?account=` URL query
- * parameter and otherwise defaults to the first account). On fetch failure
- * (or an empty list) the picker is left showing only its placeholder option
- * and the "select an account" message stays visible.
- */
-async function populateAccountPicker(): Promise<void> {
-  const picker = getAccountPicker();
-  if (!picker) return;
-
-  let accounts: string[];
-  try {
-    accounts = await getFilterValues('accounts');
-  } catch {
-    updatePlaceholderVisibility(null);
-    return;
-  }
-
-  const sorted = [...accounts].sort((a, b) => a.localeCompare(b));
-  const initial = populateAccountPickerOptions(sorted);
-  updatePlaceholderVisibility(initial);
-}
-
-/**
- * Account Detail's breakdown dimensions (plan §26): cost by service and by
- * region — two charts, vs. Service Detail's three (no charge-category
- * breakdown for accounts).
  */
 const ACCOUNT_BREAKDOWNS: BreakdownDef[] = [
   { containerId: 'account-by-service', dimension: 'service', title: 'Cost by service' },
   { containerId: 'account-by-region', dimension: 'region', title: 'Cost by region' },
 ];
 
-/**
- * Component initializers for this page, each returning a promise that
- * resolves once that component's first load has settled (success or
- * failure). The generic KPI/trend/breakdowns/top-resources components
- * register here.
- */
-const refreshers: Array<() => Promise<void>> = [
-  () => initEntityKpi(accountEntityConfig, updateStatusCurrency),
-  () => initEntityTrend(accountEntityConfig, updateStatusCurrency),
-  () => initEntityBreakdowns(accountEntityConfig, ACCOUNT_BREAKDOWNS, updateStatusCurrency),
-  () => initEntityTopResources(accountEntityConfig, updateStatusCurrency),
-];
-
-async function bootstrap(): Promise<void> {
-  initDateRangeDefaults();
-  initStatusBar();
-  initAccountPicker(updatePlaceholderVisibility);
-
-  setLoadingIndicatorVisible(true);
-  try {
-    await populateAccountPicker();
-    await Promise.allSettled(refreshers.map((refresh) => refresh()));
-  } finally {
-    setLoadingIndicatorVisible(false);
-  }
-}
-
-void bootstrap();
+void bootstrapEntityDetailPage({
+  paramName: 'account',
+  elementId: 'account-picker',
+  placeholderId: 'account-detail-placeholder',
+  filterKey: 'accounts',
+  entityNoun: 'account',
+  idPrefix: 'account',
+  breakdowns: ACCOUNT_BREAKDOWNS,
+});
