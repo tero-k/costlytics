@@ -1,7 +1,9 @@
 import './style.css';
 import { getFilterValues } from './api.ts';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible } from './shared/statusBar.ts';
+import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
 import { initAccountPicker, populateAccountPickerOptions } from './shared/accountPicker.ts';
+import { initAccountKpi } from './accountKpi.ts';
+import { initAccountTrend } from './accountTrend.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Account Detail page.
@@ -62,11 +64,16 @@ async function populateAccountPicker(): Promise<void> {
 }
 
 /**
- * Component initializers for this page. Empty for now (Task 1 page shell) —
- * the KPI/trend, breakdowns, and top-resources components register here in
- * later tasks, following `serviceDetailMain.ts`'s `refreshers` pattern.
+ * Component initializers for this page, each returning a promise that
+ * resolves once that component's first load has settled (success or
+ * failure). The KPI/trend (Task 2) are registered here; the breakdowns and
+ * top-resources components register here in later tasks, following
+ * `serviceDetailMain.ts`'s `refreshers` pattern.
  */
-const refreshers: Array<() => Promise<void>> = [];
+const refreshers: Array<() => Promise<void>> = [
+  () => initAccountKpi(updateStatusCurrency),
+  () => initAccountTrend(updateStatusCurrency),
+];
 
 async function bootstrap(): Promise<void> {
   initDateRangeDefaults();
