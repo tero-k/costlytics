@@ -4,7 +4,7 @@ import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updat
 import { initAccountPicker, populateAccountPickerOptions, accountEntityConfig } from './shared/accountPicker.ts';
 import { initEntityKpi } from './entityKpi.ts';
 import { initEntityTrend } from './entityTrend.ts';
-import { initAccountBreakdowns } from './accountBreakdowns.ts';
+import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
 import { initEntityTopResources } from './entityTopResources.ts';
 
 /**
@@ -23,13 +23,13 @@ import { initEntityTopResources } from './entityTopResources.ts';
  * `crates/data/src/queries/summary.rs`): there is no display-name concept in
  * the backend yet, so this page doesn't invent one.
  *
- * The KPI summary / trend chart / top-resources table are the generic
- * `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts` components
- * (Session 11), each instantiated here for "account" via
- * `shared/accountPicker.ts`'s `accountEntityConfig` — mirrors
- * `serviceDetailMain.ts`'s use of `serviceEntityConfig`. The service/region
- * breakdowns (`accountBreakdowns.ts`) remain account-specific for now
- * (Task 3's job).
+ * The KPI summary / trend chart / top-resources table / breakdowns are all
+ * the generic `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts`/
+ * `entityBreakdowns.ts` components (Session 11), each instantiated here for
+ * "account" via `shared/accountPicker.ts`'s `accountEntityConfig` — mirrors
+ * `serviceDetailMain.ts`'s use of `serviceEntityConfig`. The breakdowns list
+ * (service, region — no charge-category breakdown here) is this page's own
+ * `ACCOUNT_BREAKDOWNS` below.
  */
 
 function getAccountPicker(): HTMLSelectElement | null {
@@ -67,15 +67,25 @@ async function populateAccountPicker(): Promise<void> {
 }
 
 /**
+ * Account Detail's breakdown dimensions (plan §26): cost by service and by
+ * region — two charts, vs. Service Detail's three (no charge-category
+ * breakdown for accounts).
+ */
+const ACCOUNT_BREAKDOWNS: BreakdownDef[] = [
+  { containerId: 'account-by-service', dimension: 'service', title: 'Cost by service' },
+  { containerId: 'account-by-region', dimension: 'region', title: 'Cost by region' },
+];
+
+/**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). The generic KPI/trend/top-resources components and the
- * account-specific breakdowns component register here.
+ * failure). The generic KPI/trend/breakdowns/top-resources components
+ * register here.
  */
 const refreshers: Array<() => Promise<void>> = [
   () => initEntityKpi(accountEntityConfig, updateStatusCurrency),
   () => initEntityTrend(accountEntityConfig, updateStatusCurrency),
-  () => initAccountBreakdowns(updateStatusCurrency),
+  () => initEntityBreakdowns(accountEntityConfig, ACCOUNT_BREAKDOWNS, updateStatusCurrency),
   () => initEntityTopResources(accountEntityConfig, updateStatusCurrency),
 ];
 

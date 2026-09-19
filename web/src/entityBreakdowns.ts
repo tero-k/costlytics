@@ -1,31 +1,37 @@
 /**
- * Secondary breakdowns for the Account Detail page's selected account (plan
- * §26): cost by service and by region, each filtered to
- * `accounts: [selectedAccount]`.
+ * Generic secondary breakdowns for a "detail page" entity (plan §26), e.g.
+ * the Service Detail page's selected service (cost by account, by region,
+ * by charge category) or the Account Detail page's selected account (cost
+ * by service, by region), each filtered to `{filterKey}: [selected]`.
  *
- * Structurally identical to `serviceBreakdowns.ts`'s (Service Detail page)
- * horizontal-bar-chart / "Other" bucket pattern (reusing
- * `shared/horizontalBarChart.ts`'s `renderHorizontalBarChart` and
- * `shared/otherBucket.ts`'s `buildRowsWithOther`, plus `shared/chart.ts`'s
- * overlay helpers and `shared/labels.ts`'s `formatKeyLabel` via
- * `buildRowsWithOther`), just applied against `Dimension::Service` and
- * `Dimension::Region` instead of account/region/charge-category — only TWO
- * breakdowns for accounts (no charge-category breakdown per the plan), kept
- * in one module rather than two near-duplicate files, same as
- * `serviceBreakdowns.ts`.
+ * Structurally identical to `topBreakdown.ts`'s horizontal-bar-chart /
+ * "Other" bucket pattern (reusing `shared/chart.ts`'s `ensureChart`/overlay
+ * helpers, `shared/otherBucket.ts`'s `buildRowsWithOther`, and
+ * `shared/horizontalBarChart.ts`'s `renderHorizontalBarChart`), just applied
+ * once per `{dimension, containerId}` pair instead of hardcoding two or
+ * three near-identical charts per page.
  *
- * Each of the two charts owns its own `RequestGuard` (rather than one shared
- * per refresh cycle) and its own try/catch, so one dimension's request
- * failing (or resolving out of order) cannot blank out or block the other —
- * same `Promise.allSettled` discipline as the rest of the app.
+ * Generalized from `serviceBreakdowns.ts`/`accountBreakdowns.ts` (Session 11)
+ * once Session 10's whole-branch review found those two modules had zero
+ * code differences beyond entity-noun substitution AND the list of
+ * dimensions to break down by — see `shared/entityConfig.ts`'s doc comment
+ * for the entity-noun substitution points, and this module's `BreakdownDef`
+ * for the per-page dimension list (Service Detail's config lists 3, Account
+ * Detail's lists 2).
  *
- * When no account is selected (`getSelectedAccount()` returns `null`), both
- * charts clear themselves and skip fetching, per this page's "nothing to
- * fetch yet" convention (see `accountDetailMain.ts`).
+ * Each chart owns its own `RequestGuard` (rather than one shared per refresh
+ * cycle) and its own try/catch, so one dimension's request failing (or
+ * resolving out of order) cannot blank out or block the others — same
+ * `Promise.allSettled` discipline as the rest of the app. This per-dimension
+ * isolation was Session 9/10's explicitly praised pattern and is preserved
+ * here rather than regressed to a single shared guard.
+ *
+ * When no entity is selected (`config.getSelected()` returns `null`), all
+ * charts clear themselves and skip fetching, per this page family's
+ * "nothing to fetch yet" convention.
  */
 
 import { getBreakdown, getSummary, type Dimension } from './api.ts';
-import { getSelectedAccount } from './shared/accountPicker.ts';
 import { addDaysIso } from './shared/dates.ts';
 import { errorMessage } from './shared/format.ts';
 import { escapeHtml } from './shared/html.ts';
@@ -34,22 +40,18 @@ import { clearOverlays, showOverlay } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 import { buildRowsWithOther } from './shared/otherBucket.ts';
 import { renderHorizontalBarChart } from './shared/horizontalBarChart.ts';
+import type { EntityConfig } from './shared/entityConfig.ts';
 
-// ---------------------------------------------------------------------------
-// Config: one entry per chart, each with its own RequestGuard
-// ---------------------------------------------------------------------------
-
-interface ChartDef {
+/** One breakdown chart to render: which dimension, into which container, under what title. */
+export interface BreakdownDef {
   containerId: string;
   dimension: Dimension;
   title: string;
-  guard: RequestGuard;
 }
 
-const CHART_DEFS: ChartDef[] = [
-  { containerId: 'account-by-service', dimension: 'service', title: 'Cost by service', guard: new RequestGuard() },
-  { containerId: 'account-by-region', dimension: 'region', title: 'Cost by region', guard: new RequestGuard() },
-];
+interface ChartState extends BreakdownDef {
+  guard: RequestGuard;
+}
 
 // ---------------------------------------------------------------------------
 // Chart state / DOM helpers
@@ -63,7 +65,7 @@ function getChartArea(containerId: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`#${containerId}-chart`);
 }
 
-function renderShell(def: ChartDef, container: HTMLElement): void {
+function renderShell(def: ChartState, container: HTMLElement): void {
   container.innerHTML = `
     <section class="chart-section">
       <div class="chart-header">
@@ -78,8 +80,9 @@ function renderShell(def: ChartDef, container: HTMLElement): void {
 // ---------------------------------------------------------------------------
 
 async function loadChart(
-  def: ChartDef,
-  account: string,
+  def: ChartState,
+  config: EntityConfig,
+  selected: string,
   controls: Controls,
   summaryPromise: ReturnType<typeof getSummary>,
   token: number,
@@ -101,7 +104,7 @@ async function loadChart(
         end,
         metric: controls.metric,
         dimension: def.dimension,
-        accounts: [account],
+        [config.filterKey]: [selected],
         limit: 10,
       }),
       summaryPromise,
@@ -128,8 +131,14 @@ async function loadChart(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-export function initAccountBreakdowns(onCurrency?: (currency: string) => void): Promise<void> {
-  const defs = CHART_DEFS.filter((def) => getContainer(def.containerId) !== null);
+export function initEntityBreakdowns(
+  config: EntityConfig,
+  breakdowns: BreakdownDef[],
+  onCurrency?: (currency: string) => void,
+): Promise<void> {
+  const defs: ChartState[] = breakdowns
+    .filter((def) => getContainer(def.containerId) !== null)
+    .map((def) => ({ ...def, guard: new RequestGuard() }));
   if (defs.length === 0) return Promise.resolve();
 
   for (const def of defs) {
@@ -138,13 +147,13 @@ export function initAccountBreakdowns(onCurrency?: (currency: string) => void): 
   }
 
   const refresh = async (): Promise<void> => {
-    const account = getSelectedAccount();
-    if (!account) {
+    const selected = config.getSelected();
+    if (!selected) {
       for (const def of defs) {
         def.guard.next();
         const chartArea = getChartArea(def.containerId);
         if (chartArea) {
-          showOverlay(def.containerId, chartArea, 'chart-empty', 'Select an account to view this breakdown.');
+          showOverlay(def.containerId, chartArea, 'chart-empty', `Select a ${config.entityNoun} to view this breakdown.`);
         }
       }
       return;
@@ -153,25 +162,25 @@ export function initAccountBreakdowns(onCurrency?: (currency: string) => void): 
     const controls = readControls();
     if (!controls) return;
 
-    // Both dimensions need the same account-scoped overall total for their
+    // All dimensions need the same entity-scoped overall total for their
     // "Other" bucket; fetch it once per refresh cycle and share the
-    // in-flight promise instead of issuing two identical requests.
+    // in-flight promise instead of issuing one identical request per chart.
     const summaryPromise = getSummary({
       start: controls.startIso,
       end: addDaysIso(controls.endIsoInclusive, 1),
       metric: controls.metric,
-      accounts: [account],
+      [config.filterKey]: [selected],
     });
 
     await Promise.allSettled(
       defs.map((def) => {
         const token = def.guard.next();
-        return loadChart(def, account, controls, summaryPromise, token, onCurrency);
+        return loadChart(def, config, selected, controls, summaryPromise, token, onCurrency);
       }),
     );
   };
 
-  subscribeToControls(refresh, { extraIds: ['#account-picker'] });
+  subscribeToControls(refresh, { extraIds: [config.pickerSelector] });
 
   return refresh();
 }

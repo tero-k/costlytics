@@ -4,7 +4,7 @@ import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updat
 import { initServicePicker, populateServicePickerOptions, serviceEntityConfig } from './shared/servicePicker.ts';
 import { initEntityKpi } from './entityKpi.ts';
 import { initEntityTrend } from './entityTrend.ts';
-import { initServiceBreakdowns } from './serviceBreakdowns.ts';
+import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
 import { initEntityTopResources } from './entityTopResources.ts';
 
 /**
@@ -18,13 +18,15 @@ import { initEntityTopResources } from './entityTopResources.ts';
  * `#date-start`/`#date-end`/`#metric-select` (see `subscribeToControls`'s
  * `extraIds` option).
  *
- * The KPI summary / trend chart / top-resources table are the generic
- * `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts` components
- * (Session 11), each instantiated here for "service" via
- * `shared/servicePicker.ts`'s `serviceEntityConfig`. The
- * account/region/charge-category breakdowns (`serviceBreakdowns.ts`) remain
- * service-specific for now (Task 3's job). Each component registers its
- * `init*` call into `refreshers` below, following the same pattern as
+ * The KPI summary / trend chart / top-resources table / breakdowns are all
+ * the generic `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts`/
+ * `entityBreakdowns.ts` components (Session 11), each instantiated here for
+ * "service" via `shared/servicePicker.ts`'s `serviceEntityConfig`. The
+ * breakdowns list (account, region, charge_category) is this page's own
+ * `SERVICE_BREAKDOWNS` below — the one piece of genuinely different
+ * configuration vs. Account Detail's two-dimension list. Each component
+ * registers its `init*` call into `refreshers` below, following the same
+ * pattern as
  * `main.ts`/`explorerMain.ts`. Each of those components is responsible for
  * reading `#service-picker`'s current value itself (via
  * `serviceEntityConfig.getSelected`, i.e. `getSelectedService()` from
@@ -68,15 +70,25 @@ async function populateServicePicker(): Promise<void> {
 }
 
 /**
+ * Service Detail's breakdown dimensions (plan §26): cost by account, by
+ * region, and by charge category — three charts, vs. Account Detail's two.
+ */
+const SERVICE_BREAKDOWNS: BreakdownDef[] = [
+  { containerId: 'service-by-account', dimension: 'account', title: 'Cost by account' },
+  { containerId: 'service-by-region', dimension: 'region', title: 'Cost by region' },
+  { containerId: 'service-by-category', dimension: 'charge_category', title: 'Cost by charge category' },
+];
+
+/**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). The generic KPI/trend/top-resources components and the
- * service-specific breakdowns component register here.
+ * failure). The generic KPI/trend/breakdowns/top-resources components
+ * register here.
  */
 const refreshers: Array<() => Promise<void>> = [
   () => initEntityKpi(serviceEntityConfig, updateStatusCurrency),
   () => initEntityTrend(serviceEntityConfig, updateStatusCurrency),
-  () => initServiceBreakdowns(updateStatusCurrency),
+  () => initEntityBreakdowns(serviceEntityConfig, SERVICE_BREAKDOWNS, updateStatusCurrency),
   () => initEntityTopResources(serviceEntityConfig, updateStatusCurrency),
 ];
 
