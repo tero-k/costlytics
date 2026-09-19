@@ -10,6 +10,7 @@
  */
 
 import { createDimensionPicker } from './dimensionPicker.ts';
+import type { EntityConfig } from './entityConfig.ts';
 
 const accountPicker = createDimensionPicker({ paramName: 'account', elementId: 'account-picker' });
 
@@ -37,3 +38,17 @@ export const populateAccountPickerOptions = accountPicker.populateOptions;
 
 /** Wires `#account-picker`'s `change` event to sync the URL param and notify `onChange`. */
 export const initAccountPicker = accountPicker.init;
+
+/**
+ * {@link EntityConfig} instantiation for the Account Detail page, consumed by
+ * the generic `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts`
+ * components (via `accountDetailMain.ts`) so they can fetch/filter/render for
+ * "account" without any account-specific code of their own.
+ */
+export const accountEntityConfig: EntityConfig = {
+  entityNoun: 'account',
+  idPrefix: 'account',
+  filterKey: 'accounts',
+  pickerSelector: '#account-picker',
+  getSelected: getSelectedAccount,
+};

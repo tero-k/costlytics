@@ -1,11 +1,11 @@
 import './style.css';
 import { getFilterValues } from './api.ts';
 import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
-import { initAccountPicker, populateAccountPickerOptions } from './shared/accountPicker.ts';
-import { initAccountKpi } from './accountKpi.ts';
-import { initAccountTrend } from './accountTrend.ts';
+import { initAccountPicker, populateAccountPickerOptions, accountEntityConfig } from './shared/accountPicker.ts';
+import { initEntityKpi } from './entityKpi.ts';
+import { initEntityTrend } from './entityTrend.ts';
 import { initAccountBreakdowns } from './accountBreakdowns.ts';
-import { initAccountTopResources } from './accountTopResources.ts';
+import { initEntityTopResources } from './entityTopResources.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Account Detail page.
@@ -23,10 +23,13 @@ import { initAccountTopResources } from './accountTopResources.ts';
  * `crates/data/src/queries/summary.rs`): there is no display-name concept in
  * the backend yet, so this page doesn't invent one.
  *
- * The KPI summary/trend chart (Task 2), the service/region breakdowns
- * (Task 3), and the top-resources table (Task 4) are all wired in below via
- * the `refreshers` list, following `serviceDetailMain.ts`'s `refreshers`
- * pattern.
+ * The KPI summary / trend chart / top-resources table are the generic
+ * `entityKpi.ts`/`entityTrend.ts`/`entityTopResources.ts` components
+ * (Session 11), each instantiated here for "account" via
+ * `shared/accountPicker.ts`'s `accountEntityConfig` — mirrors
+ * `serviceDetailMain.ts`'s use of `serviceEntityConfig`. The service/region
+ * breakdowns (`accountBreakdowns.ts`) remain account-specific for now
+ * (Task 3's job).
  */
 
 function getAccountPicker(): HTMLSelectElement | null {
@@ -66,14 +69,14 @@ async function populateAccountPicker(): Promise<void> {
 /**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). The KPI/trend (Task 2), service/region breakdowns (Task 3), and
- * top-resources table (Task 4) are all registered here.
+ * failure). The generic KPI/trend/top-resources components and the
+ * account-specific breakdowns component register here.
  */
 const refreshers: Array<() => Promise<void>> = [
-  () => initAccountKpi(updateStatusCurrency),
-  () => initAccountTrend(updateStatusCurrency),
+  () => initEntityKpi(accountEntityConfig, updateStatusCurrency),
+  () => initEntityTrend(accountEntityConfig, updateStatusCurrency),
   () => initAccountBreakdowns(updateStatusCurrency),
-  () => initAccountTopResources(updateStatusCurrency),
+  () => initEntityTopResources(accountEntityConfig, updateStatusCurrency),
 ];
 
 async function bootstrap(): Promise<void> {
