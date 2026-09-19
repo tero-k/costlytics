@@ -5,6 +5,7 @@ import { initAccountPicker, populateAccountPickerOptions } from './shared/accoun
 import { initAccountKpi } from './accountKpi.ts';
 import { initAccountTrend } from './accountTrend.ts';
 import { initAccountBreakdowns } from './accountBreakdowns.ts';
+import { initAccountTopResources } from './accountTopResources.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Account Detail page.
@@ -22,10 +23,10 @@ import { initAccountBreakdowns } from './accountBreakdowns.ts';
  * `crates/data/src/queries/summary.rs`): there is no display-name concept in
  * the backend yet, so this page doesn't invent one.
  *
- * The KPI summary/trend chart (Task 2) and the service/region breakdowns
- * (Task 3) are wired in below via the `refreshers` list; the top-resources
- * table (`#account-top-resources`) is left as an empty placeholder `div` for
- * a later task, following `serviceDetailMain.ts`'s `refreshers` pattern.
+ * The KPI summary/trend chart (Task 2), the service/region breakdowns
+ * (Task 3), and the top-resources table (Task 4) are all wired in below via
+ * the `refreshers` list, following `serviceDetailMain.ts`'s `refreshers`
+ * pattern.
  */
 
 function getAccountPicker(): HTMLSelectElement | null {
@@ -65,14 +66,14 @@ async function populateAccountPicker(): Promise<void> {
 /**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). The KPI/trend (Task 2) and service/region breakdowns (Task 3)
- * are registered here; the top-resources component registers here in a
- * later task, following `serviceDetailMain.ts`'s `refreshers` pattern.
+ * failure). The KPI/trend (Task 2), service/region breakdowns (Task 3), and
+ * top-resources table (Task 4) are all registered here.
  */
 const refreshers: Array<() => Promise<void>> = [
   () => initAccountKpi(updateStatusCurrency),
   () => initAccountTrend(updateStatusCurrency),
   () => initAccountBreakdowns(updateStatusCurrency),
+  () => initAccountTopResources(updateStatusCurrency),
 ];
 
 async function bootstrap(): Promise<void> {
