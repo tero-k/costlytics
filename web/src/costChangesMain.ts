@@ -1,7 +1,9 @@
 import './style.css';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible } from './shared/statusBar.ts';
+import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
 import { previousPeriod } from './shared/dates.ts';
 import { subscribeToControls } from './shared/controls.ts';
+import { initChangesSummary } from './costChangesSummary.ts';
+import { initChangesMovers } from './costChangesMovers.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Cost Changes page.
@@ -32,7 +34,10 @@ import { subscribeToControls } from './shared/controls.ts';
  * resolves once that component's first load has settled (success or
  * failure). Empty in Task 1; Tasks 2-3 push their `init*` functions here.
  */
-const refreshers: Array<() => Promise<void>> = [];
+const refreshers: Array<() => Promise<void>> = [
+  () => initChangesSummary(updateStatusCurrency),
+  () => initChangesMovers(),
+];
 
 function refresh(): void {
   void Promise.allSettled(refreshers.map((r) => r()));

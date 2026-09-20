@@ -331,3 +331,79 @@ main {
 .explorer-table .change-good {
   color: var(--color-success);
 }
+
+/* Cost Changes page: "biggest movers" two-column lists (`costChangesMovers.ts`). */
+.movers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--spacing);
+}
+
+.movers-column {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--spacing);
+}
+
+.movers-column h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem 0;
+}
+
+.movers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.movers-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing);
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.9rem;
+}
+
+.movers-item:last-child {
+  border-bottom: none;
+}
+
+.movers-key {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.movers-values {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+}
+
+.movers-change {
+  font-weight: 600;
+}
+
+.movers-change.change-bad {
+  color: var(--color-danger);
+}
+
+.movers-change.change-good {
+  color: var(--color-success);
+}
+
+.movers-change.change-neutral {
+  color: var(--color-text);
+}
+
+.movers-sub {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
