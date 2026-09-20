@@ -22,66 +22,19 @@ import { addDaysIso, previousPeriod } from './shared/dates.ts';
 import { formatCurrency, errorMessage, formatPercent, formatSignedCurrency, changeClass } from './shared/format.ts';
 import { readControls, subscribeToControls, type Controls } from './shared/controls.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
+import { renderKpiShell, setKpiLoading, setKpiError, setKpiValue, type KpiCardDef } from './shared/kpiCard.ts';
 
 // ---------------------------------------------------------------------------
 // DOM shell
 // ---------------------------------------------------------------------------
 
-const CARD_DEFS: Array<{ id: string; label: string }> = [
+const CARD_DEFS: KpiCardDef[] = [
   { id: 'kpi-current', label: 'Selected period' },
   { id: 'kpi-previous', label: 'Previous period' },
   { id: 'kpi-change', label: 'Change' },
   { id: 'kpi-mtd', label: 'Month to date' },
   { id: 'kpi-projected', label: 'Projected (run-rate estimate)' },
 ];
-
-function renderShell(container: HTMLElement): void {
-  const cardsHtml = CARD_DEFS.map(
-    ({ id, label }) => `
-      <div class="kpi-card loading" id="${id}">
-        <div class="label">${label}</div>
-        <div class="value">&hellip;</div>
-        <div class="sub"></div>
-      </div>`,
-  ).join('');
-
-  container.innerHTML = `<div class="kpi-grid">${cardsHtml}</div>`;
-}
-
-function setLoading(id: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('error', 'change-bad', 'change-good', 'change-neutral');
-  card.classList.add('loading');
-  const value = card.querySelector<HTMLElement>('.value');
-  const sub = card.querySelector<HTMLElement>('.sub');
-  if (value) value.textContent = '…';
-  if (sub) sub.textContent = '';
-}
-
-function setError(id: string, message: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('loading', 'change-bad', 'change-good', 'change-neutral');
-  card.classList.add('error');
-  const value = card.querySelector<HTMLElement>('.value');
-  const sub = card.querySelector<HTMLElement>('.sub');
-  if (value) value.textContent = 'Error';
-  if (sub) sub.textContent = message;
-}
-
-function setValue(id: string, value: string, sub?: string, subClass?: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('loading', 'error');
-  const valueEl = card.querySelector<HTMLElement>('.value');
-  const subEl = card.querySelector<HTMLElement>('.sub');
-  if (valueEl) valueEl.textContent = value;
-  if (subEl) {
-    subEl.textContent = sub ?? '';
-    subEl.className = 'sub' + (subClass ? ` ${subClass}` : '');
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Date helpers not shared with other modules (MTD-specific)
@@ -110,9 +63,9 @@ async function loadCompareCards(
   token: number,
   onCurrency?: (currency: string) => void,
 ): Promise<void> {
-  setLoading('kpi-current');
-  setLoading('kpi-previous');
-  setLoading('kpi-change');
+  setKpiLoading('kpi-current');
+  setKpiLoading('kpi-previous');
+  setKpiLoading('kpi-change');
 
   // The canonical `end` is exclusive; the date picker's "To" value is
   // inclusive, so the request's current_end is the day after it.
@@ -141,19 +94,18 @@ async function loadCompareCards(
     }
 
     onCurrency?.(result.currency);
-    setValue('kpi-current', formatCurrency(row.current, result.currency));
-    setValue('kpi-previous', formatCurrency(row.previous, result.currency));
+    setKpiValue('kpi-current', formatCurrency(row.current, result.currency));
+    setKpiValue('kpi-previous', formatCurrency(row.previous, result.currency));
 
     const changeValue = formatSignedCurrency(row.absolute_change, result.currency);
     const changePct = row.percentage_change === null ? 'N/A' : formatPercent(row.percentage_change);
-    setValue('kpi-change', `${changeValue} (${changePct})`);
-    document.getElementById('kpi-change')?.classList.add(changeClass(row.absolute_change));
+    setKpiValue('kpi-change', `${changeValue} (${changePct})`, { cardClass: changeClass(row.absolute_change) });
   } catch (err) {
     if (!refreshGuard.isCurrent(token)) return;
     const message = errorMessage(err);
-    setError('kpi-current', message);
-    setError('kpi-previous', message);
-    setError('kpi-change', message);
+    setKpiError('kpi-current', message);
+    setKpiError('kpi-previous', message);
+    setKpiError('kpi-change', message);
   }
 }
 
@@ -166,8 +118,8 @@ async function loadMtdCards(
   token: number,
   onCurrency?: (currency: string) => void,
 ): Promise<void> {
-  setLoading('kpi-mtd');
-  setLoading('kpi-projected');
+  setKpiLoading('kpi-mtd');
+  setKpiLoading('kpi-projected');
 
   const now = new Date();
   const startOfMonth = toDateIso(new Date(now.getFullYear(), now.getMonth(), 1));
@@ -189,19 +141,17 @@ async function loadMtdCards(
     if (!refreshGuard.isCurrent(token)) return;
 
     onCurrency?.(summary.currency);
-    setValue('kpi-mtd', formatCurrency(summary.total, summary.currency));
+    setKpiValue('kpi-mtd', formatCurrency(summary.total, summary.currency));
 
     const projected = dayOfMonth > 0 ? (summary.total / dayOfMonth) * totalDaysInMonth : summary.total;
-    setValue(
-      'kpi-projected',
-      formatCurrency(projected, summary.currency),
-      `Based on ${dayOfMonth} of ${totalDaysInMonth} days elapsed`,
-    );
+    setKpiValue('kpi-projected', formatCurrency(projected, summary.currency), {
+      sub: `Based on ${dayOfMonth} of ${totalDaysInMonth} days elapsed`,
+    });
   } catch (err) {
     if (!refreshGuard.isCurrent(token)) return;
     const message = errorMessage(err);
-    setError('kpi-mtd', message);
-    setError('kpi-projected', message);
+    setKpiError('kpi-mtd', message);
+    setKpiError('kpi-projected', message);
   }
 }
 
@@ -213,7 +163,7 @@ export function initKpiCards(onCurrency?: (currency: string) => void): Promise<v
   const container = document.querySelector<HTMLElement>('#overview');
   if (!container) return Promise.resolve();
 
-  renderShell(container);
+  renderKpiShell(container, CARD_DEFS);
 
   const refresh = async (): Promise<void> => {
     const controls = readControls();

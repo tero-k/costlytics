@@ -26,6 +26,7 @@ import { formatCurrency, errorMessage } from './shared/format.ts';
 import { readControls, subscribeToControls, type Controls } from './shared/controls.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 import type { EntityConfig } from './shared/entityConfig.ts';
+import { renderKpiShell, setKpiLoading, setKpiError, setKpiValue, type KpiCardDef } from './shared/kpiCard.ts';
 
 interface CardIds {
   total: string;
@@ -45,55 +46,12 @@ function getContainer(idPrefix: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`#${idPrefix}-kpi`);
 }
 
-function renderShell(container: HTMLElement, ids: CardIds): void {
-  const cardsHtml = [
+function cardDefs(ids: CardIds): KpiCardDef[] {
+  return [
     { id: ids.total, label: 'Total cost' },
     { id: ids.rows, label: 'Row count' },
     { id: ids.currency, label: 'Currency' },
-  ]
-    .map(
-      ({ id, label }) => `
-      <div class="kpi-card loading" id="${id}">
-        <div class="label">${label}</div>
-        <div class="value">&hellip;</div>
-        <div class="sub"></div>
-      </div>`,
-    )
-    .join('');
-
-  container.innerHTML = `<div class="kpi-grid">${cardsHtml}</div>`;
-}
-
-function setLoading(id: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('error');
-  card.classList.add('loading');
-  const value = card.querySelector<HTMLElement>('.value');
-  const sub = card.querySelector<HTMLElement>('.sub');
-  if (value) value.textContent = '…';
-  if (sub) sub.textContent = '';
-}
-
-function setError(id: string, message: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('loading');
-  card.classList.add('error');
-  const value = card.querySelector<HTMLElement>('.value');
-  const sub = card.querySelector<HTMLElement>('.sub');
-  if (value) value.textContent = 'Error';
-  if (sub) sub.textContent = message;
-}
-
-function setValue(id: string, value: string, sub?: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('loading', 'error');
-  const valueEl = card.querySelector<HTMLElement>('.value');
-  const subEl = card.querySelector<HTMLElement>('.sub');
-  if (valueEl) valueEl.textContent = value;
-  if (subEl) subEl.textContent = sub ?? '';
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -115,12 +73,12 @@ export function initEntityKpi(
   const ids = cardIds(config.idPrefix);
   const refreshGuard = new RequestGuard();
 
-  renderShell(container, ids);
+  renderKpiShell(container, cardDefs(ids));
 
   async function loadKpiCards(selected: string, controls: Controls, token: number): Promise<void> {
-    setLoading(ids.total);
-    setLoading(ids.rows);
-    setLoading(ids.currency);
+    setKpiLoading(ids.total);
+    setKpiLoading(ids.rows);
+    setKpiLoading(ids.currency);
 
     const start = controls.startIso;
     // `end` is exclusive; the date picker's "To" value is inclusive.
@@ -137,15 +95,15 @@ export function initEntityKpi(
       if (!refreshGuard.isCurrent(token)) return;
 
       onCurrency?.(summary.currency);
-      setValue(ids.total, formatCurrency(summary.total, summary.currency));
-      setValue(ids.rows, summary.row_count.toLocaleString());
-      setValue(ids.currency, summary.currency || 'N/A');
+      setKpiValue(ids.total, formatCurrency(summary.total, summary.currency));
+      setKpiValue(ids.rows, summary.row_count.toLocaleString());
+      setKpiValue(ids.currency, summary.currency || 'N/A');
     } catch (err) {
       if (!refreshGuard.isCurrent(token)) return;
       const message = errorMessage(err);
-      setError(ids.total, message);
-      setError(ids.rows, message);
-      setError(ids.currency, message);
+      setKpiError(ids.total, message);
+      setKpiError(ids.rows, message);
+      setKpiError(ids.currency, message);
     }
   }
 
@@ -153,7 +111,7 @@ export function initEntityKpi(
     const selected = config.getSelected();
     if (!selected) {
       refreshGuard.next();
-      renderShell(container, ids);
+      renderKpiShell(container, cardDefs(ids));
       return;
     }
 

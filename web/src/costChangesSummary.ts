@@ -5,9 +5,8 @@
  * Calls `getCompare()` with NO `dimension`, so the API returns a single
  * aggregate row (`key: null`) covering the whole current-vs-previous period
  * pair — unlike `costChangesMovers.ts`, which requests the same endpoint
- * WITH the page's selected dimension. Reuses `kpiCards.ts`'s CSS
- * classes/card pattern (`.kpi-grid` / `.kpi-card`) rather than inventing a
- * new card style, per the task's mandatory-reuse constraint.
+ * WITH the page's selected dimension. Uses `shared/kpiCard.ts`'s DOM shell
+ * (`.kpi-grid` / `.kpi-card`) rather than inventing a new card style.
  *
  * Renders 4 cards: Current total, Previous total, Change (absolute), and
  * Change % ("N/A" when `percentage_change` is `null`, i.e. previous === 0).
@@ -18,10 +17,11 @@ import { addDaysIso } from './shared/dates.ts';
 import { formatCurrency, formatPercent, formatSignedCurrency, changeClass, errorMessage } from './shared/format.ts';
 import { readChangesControls, type ChangesControls } from './shared/controls.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
+import { renderKpiShell, setKpiLoading, setKpiError, setKpiValue, type KpiCardDef } from './shared/kpiCard.ts';
 
 const CONTAINER_ID = 'changes-summary';
 
-const CARD_DEFS: Array<{ id: string; label: string }> = [
+const CARD_DEFS: KpiCardDef[] = [
   { id: 'changes-kpi-current', label: 'Current period total' },
   { id: 'changes-kpi-previous', label: 'Previous period total' },
   { id: 'changes-kpi-change', label: 'Change' },
@@ -30,56 +30,8 @@ const CARD_DEFS: Array<{ id: string; label: string }> = [
 
 const refreshGuard = new RequestGuard();
 
-// ---------------------------------------------------------------------------
-// DOM helpers (mirrors `kpiCards.ts`'s shell/loading/error/value helpers)
-// ---------------------------------------------------------------------------
-
 function getContainer(): HTMLElement | null {
   return document.querySelector<HTMLElement>(`#${CONTAINER_ID}`);
-}
-
-function renderShell(container: HTMLElement): void {
-  const cardsHtml = CARD_DEFS.map(
-    ({ id, label }) => `
-      <div class="kpi-card loading" id="${id}">
-        <div class="label">${label}</div>
-        <div class="value">&hellip;</div>
-        <div class="sub"></div>
-      </div>`,
-  ).join('');
-
-  container.innerHTML = `<div class="kpi-grid">${cardsHtml}</div>`;
-}
-
-function setLoading(id: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('error', 'change-bad', 'change-good', 'change-neutral');
-  card.classList.add('loading');
-  const value = card.querySelector<HTMLElement>('.value');
-  const sub = card.querySelector<HTMLElement>('.sub');
-  if (value) value.textContent = '…';
-  if (sub) sub.textContent = '';
-}
-
-function setError(id: string, message: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('loading', 'change-bad', 'change-good', 'change-neutral');
-  card.classList.add('error');
-  const value = card.querySelector<HTMLElement>('.value');
-  const sub = card.querySelector<HTMLElement>('.sub');
-  if (value) value.textContent = 'Error';
-  if (sub) sub.textContent = message;
-}
-
-function setValue(id: string, value: string, subClass?: string): void {
-  const card = document.getElementById(id);
-  if (!card) return;
-  card.classList.remove('loading', 'error');
-  const valueEl = card.querySelector<HTMLElement>('.value');
-  if (valueEl) valueEl.textContent = value;
-  if (subClass) card.classList.add(subClass);
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +44,7 @@ async function loadSummary(
   onCurrency?: (currency: string) => void,
 ): Promise<void> {
   const allIds = CARD_DEFS.map((c) => c.id);
-  allIds.forEach(setLoading);
+  allIds.forEach(setKpiLoading);
 
   // The canonical `end` is exclusive; both date pickers' "To" values are
   // inclusive, so both requests' `*_end` are the day after them.
@@ -119,17 +71,17 @@ async function loadSummary(
     }
 
     onCurrency?.(result.currency);
-    setValue('changes-kpi-current', formatCurrency(row.current, result.currency));
-    setValue('changes-kpi-previous', formatCurrency(row.previous, result.currency));
+    setKpiValue('changes-kpi-current', formatCurrency(row.current, result.currency));
+    setKpiValue('changes-kpi-previous', formatCurrency(row.previous, result.currency));
 
     const cls = changeClass(row.absolute_change);
-    setValue('changes-kpi-change', formatSignedCurrency(row.absolute_change, result.currency), cls);
+    setKpiValue('changes-kpi-change', formatSignedCurrency(row.absolute_change, result.currency), { cardClass: cls });
     const changePctText = row.percentage_change === null ? 'N/A' : formatPercent(row.percentage_change);
-    setValue('changes-kpi-change-pct', changePctText, cls);
+    setKpiValue('changes-kpi-change-pct', changePctText, { cardClass: cls });
   } catch (err) {
     if (!refreshGuard.isCurrent(token)) return;
     const message = errorMessage(err);
-    allIds.forEach((id) => setError(id, message));
+    allIds.forEach((id) => setKpiError(id, message));
   }
 }
 
@@ -141,7 +93,7 @@ export function initChangesSummary(onCurrency?: (currency: string) => void): Pro
   const container = getContainer();
   if (!container) return Promise.resolve();
 
-  renderShell(container);
+  renderKpiShell(container, CARD_DEFS);
 
   const refresh = async (): Promise<void> => {
     const controls = readChangesControls();
