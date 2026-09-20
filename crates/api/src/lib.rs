@@ -15,7 +15,7 @@ use data::{
     schema_detection::{self, DetectedSchema},
 };
 
-use crate::state::AppState;
+use crate::state::{AppState, SourceDiagnostic, SourceStatus};
 
 /// Default date range used for startup partition discovery: the last 5 years
 /// through the end of next month. This is broad enough to pick up any
@@ -48,16 +48,32 @@ pub fn default_discovery_range() -> (NaiveDate, NaiveDate) {
 pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router> {
     let mut pools: HashMap<String, duckdb_pool::DbPool> = HashMap::new();
     let mut repos: HashMap<String, Arc<dyn CostRepository>> = HashMap::new();
+    // Per-source diagnostic outcome, captured alongside (not instead of) the
+    // existing `tracing::warn!`/`tracing::error!` calls below — every
+    // `continue` point pushes a `Skipped` entry with the same reason that's
+    // already being logged, and the loop's successful-registration exit
+    // pushes a `Registered` entry. See `SourceDiagnostic`/`SourceStatus` in
+    // `state.rs`. This never changes which sources get registered/skipped or
+    // in what order — it only records what already happens.
+    let mut source_statuses: Vec<SourceDiagnostic> = Vec::new();
 
     let (range_start, range_end) = default_discovery_range();
     let store = LocalObjectStore;
 
     for source in &config.sources {
         if source.is_s3() {
+            let reason =
+                "S3 source; S3 discovery not implemented this session".to_string();
             tracing::warn!(
                 source_id = %source.id,
                 "S3 source configured; S3 discovery is not implemented this session, skipping."
             );
+            source_statuses.push(SourceDiagnostic {
+                id: source.id.clone(),
+                name: source.name.clone(),
+                configured_type: source.source_type.clone(),
+                status: SourceStatus::Skipped { reason },
+            });
             continue;
         }
 
@@ -75,6 +91,14 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                     error = %e,
                     "partition discovery failed; skipping source"
                 );
+                source_statuses.push(SourceDiagnostic {
+                    id: source.id.clone(),
+                    name: source.name.clone(),
+                    configured_type: source.source_type.clone(),
+                    status: SourceStatus::Skipped {
+                        reason: format!("partition discovery failed: {e}"),
+                    },
+                });
                 continue;
             }
         };
@@ -100,11 +124,35 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(source_id = %source.id, error = %e, "failed to build DuckDB pool");
+                source_statuses.push(SourceDiagnostic {
+                    id: source.id.clone(),
+                    name: source.name.clone(),
+                    configured_type: source.source_type.clone(),
+                    status: SourceStatus::Skipped {
+                        reason: format!("failed to build DuckDB pool: {e}"),
+                    },
+                });
                 continue;
             }
         };
 
         // Confirm schema and register view (only if we have files to inspect).
+        // `detected_format` stays "none" when `files` is empty: no schema
+        // detection runs in that case (see the `if !files.is_empty()` guard
+        // below), yet the source still falls through to the unconditional
+        // `pools`/`repos` insertion at the end of this iteration (existing
+        // behavior, unchanged by this task) and is therefore queryable via
+        // `source_id` — just with zero rows. Judgment call (documented per
+        // the task brief): an empty-but-otherwise-valid local source is
+        // reported `Registered { file_count: 0, .. }`, not `Skipped`, since
+        // that's what it actually is from the API's point of view — it has a
+        // pool/repo and answers queries (with empty results), which is a
+        // materially different situation from a source that was never
+        // registered at all (e.g. schema detection failure). A reader of
+        // `GET /api/v1/sources` sees `file_count: 0` and a `detected_format`
+        // of "none", which already makes the "no data" situation visible
+        // without conflating it with a hard registration failure.
+        let mut detected_format = "none".to_string();
         if !files.is_empty() {
             let conn = match pool.get() {
                 Ok(c) => c,
@@ -114,12 +162,30 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                         error = %e,
                         "failed to get pooled connection for schema detection/view registration"
                     );
+                    source_statuses.push(SourceDiagnostic {
+                        id: source.id.clone(),
+                        name: source.name.clone(),
+                        configured_type: source.source_type.clone(),
+                        status: SourceStatus::Skipped {
+                            reason: format!(
+                                "failed to get pooled connection for schema detection/view registration: {e}"
+                            ),
+                        },
+                    });
                     continue;
                 }
             };
 
             if let Err(e) = conn.execute_batch("LOAD parquet;") {
                 tracing::error!(source_id = %source.id, error = %e, "failed to load parquet extension");
+                source_statuses.push(SourceDiagnostic {
+                    id: source.id.clone(),
+                    name: source.name.clone(),
+                    configured_type: source.source_type.clone(),
+                    status: SourceStatus::Skipped {
+                        reason: format!("failed to load parquet extension: {e}"),
+                    },
+                });
                 continue;
             }
 
@@ -131,8 +197,17 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                             error = %e,
                             "failed to register normalized_cost view; skipping source"
                         );
+                        source_statuses.push(SourceDiagnostic {
+                            id: source.id.clone(),
+                            name: source.name.clone(),
+                            configured_type: source.source_type.clone(),
+                            status: SourceStatus::Skipped {
+                                reason: format!("failed to register view: {e}"),
+                            },
+                        });
                         continue;
                     }
+                    detected_format = "focus12".to_string();
                 }
                 Ok(DetectedSchema::Cur2) => {
                     if let Err(e) = cur2::register_view(&conn, &files) {
@@ -141,8 +216,17 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                             error = %e,
                             "failed to register normalized_cost view; skipping source"
                         );
+                        source_statuses.push(SourceDiagnostic {
+                            id: source.id.clone(),
+                            name: source.name.clone(),
+                            configured_type: source.source_type.clone(),
+                            status: SourceStatus::Skipped {
+                                reason: format!("failed to register view: {e}"),
+                            },
+                        });
                         continue;
                     }
+                    detected_format = "cur2".to_string();
                 }
                 Ok(DetectedSchema::Focus10) => {
                     if let Err(e) = focus10::register_view(&conn, &files) {
@@ -151,8 +235,17 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                             error = %e,
                             "failed to register normalized_cost view; skipping source"
                         );
+                        source_statuses.push(SourceDiagnostic {
+                            id: source.id.clone(),
+                            name: source.name.clone(),
+                            configured_type: source.source_type.clone(),
+                            status: SourceStatus::Skipped {
+                                reason: format!("failed to register view: {e}"),
+                            },
+                        });
                         continue;
                     }
+                    detected_format = "focus10".to_string();
                 }
                 Ok(other) => {
                     tracing::warn!(
@@ -160,6 +253,15 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                         detected = ?other,
                         "detected schema is not FOCUS 1.0, FOCUS 1.2, or CUR 2.0; only these formats are supported this session, skipping source"
                     );
+                    source_statuses.push(SourceDiagnostic {
+                        id: source.id.clone(),
+                        name: source.name.clone(),
+                        configured_type: source.source_type.clone(),
+                        status: SourceStatus::Skipped {
+                            reason: "detected schema is not FOCUS 1.0/1.2 or CUR 2.0"
+                                .to_string(),
+                        },
+                    });
                     continue;
                 }
                 Err(e) => {
@@ -168,6 +270,14 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
                         error = %e,
                         "schema detection failed; skipping source"
                     );
+                    source_statuses.push(SourceDiagnostic {
+                        id: source.id.clone(),
+                        name: source.name.clone(),
+                        configured_type: source.source_type.clone(),
+                        status: SourceStatus::Skipped {
+                            reason: format!("schema detection failed: {e}"),
+                        },
+                    });
                     continue;
                 }
             }
@@ -177,12 +287,22 @@ pub fn build_app(config: data::config::AppConfig) -> anyhow::Result<axum::Router
 
         pools.insert(source.id.clone(), pool);
         repos.insert(source.id.clone(), repo);
+        source_statuses.push(SourceDiagnostic {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            configured_type: source.source_type.clone(),
+            status: SourceStatus::Registered {
+                detected_format,
+                file_count: files.len(),
+            },
+        });
     }
 
     let state = AppState {
         config,
         pools,
         repos,
+        source_statuses,
     };
 
     Ok(routes::build_router(state))

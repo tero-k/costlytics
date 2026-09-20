@@ -756,6 +756,90 @@ pub async fn filter_values_tag_values(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/sources
+// ---------------------------------------------------------------------------
+
+/// JSON mirror of `crate::state::SourceStatus`, `#[serde(tag = "state")]` so
+/// each entry's JSON shape is either
+/// `{"state": "registered", "detected_format": "...", "file_count": N}` or
+/// `{"state": "skipped", "reason": "..."}`.
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SourceStatusResponse {
+    Registered {
+        detected_format: String,
+        file_count: usize,
+    },
+    Skipped {
+        reason: String,
+    },
+}
+
+impl From<&crate::state::SourceStatus> for SourceStatusResponse {
+    fn from(status: &crate::state::SourceStatus) -> Self {
+        match status {
+            crate::state::SourceStatus::Registered {
+                detected_format,
+                file_count,
+            } => SourceStatusResponse::Registered {
+                detected_format: detected_format.clone(),
+                file_count: *file_count,
+            },
+            crate::state::SourceStatus::Skipped { reason } => {
+                SourceStatusResponse::Skipped {
+                    reason: reason.clone(),
+                }
+            }
+        }
+    }
+}
+
+/// JSON mirror of `crate::state::SourceDiagnostic`.
+#[derive(Serialize)]
+pub struct SourceEntry {
+    pub id: String,
+    pub name: String,
+    pub configured_type: data::config::SourceType,
+    #[serde(flatten)]
+    pub status: SourceStatusResponse,
+}
+
+#[derive(Serialize)]
+pub struct SourcesResponse {
+    pub sources: Vec<SourceEntry>,
+    /// The `source_id` that `resolve_source(state, None)` would pick — i.e.
+    /// `state.config.sources.first().id`, mirroring `resolve_source`'s exact
+    /// fallback rule (the first *configured* source, not the first
+    /// *registered* one — if that source happens to be skipped,
+    /// `resolve_source(None)` itself would fail with "unknown source_id",
+    /// which this field intentionally surfaces rather than papers over).
+    pub default_source_id: Option<String>,
+}
+
+pub async fn sources_list(State(state): State<AppState>) -> impl IntoResponse {
+    let sources = state
+        .source_statuses
+        .iter()
+        .map(|d| SourceEntry {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            configured_type: d.configured_type.clone(),
+            status: SourceStatusResponse::from(&d.status),
+        })
+        .collect();
+
+    let default_source_id = state.config.sources.first().map(|s| s.id.clone());
+
+    (
+        StatusCode::OK,
+        Json(SourcesResponse {
+            sources,
+            default_source_id,
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -895,10 +979,21 @@ mod tests {
         let mut repos = HashMap::new();
         repos.insert("test-source".to_string(), repo);
 
+        let source_statuses = vec![crate::state::SourceDiagnostic {
+            id: "test-source".into(),
+            name: "Test".into(),
+            configured_type: data::config::SourceType::Focus12,
+            status: crate::state::SourceStatus::Registered {
+                detected_format: "focus12".into(),
+                file_count: 3,
+            },
+        }];
+
         AppState {
             config,
             pools: HashMap::new(),
             repos,
+            source_statuses,
         }
     }
 
@@ -1364,5 +1459,141 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["dimension"], serde_json::Value::Null);
         assert_eq!(json["rows"][0]["key"], serde_json::Value::Null);
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/v1/sources
+    // -----------------------------------------------------------------------
+
+    /// Builds an `AppState` with two configured sources: `good` mirrors
+    /// `make_state`'s registered local-demo-style source (has a `repo`,
+    /// `Registered` status), and `broken` is a deliberately-skipped source
+    /// (no `repo` entry, `Skipped` status with a realistic reason) — as if
+    /// it pointed at an empty/nonexistent directory and schema detection
+    /// never ran. Exercises `sources_list` against a mix, not just the
+    /// trivial single-source case `make_state` covers elsewhere.
+    fn make_state_with_mixed_sources() -> AppState {
+        let good = data::config::DataSource {
+            id: "good-source".into(),
+            name: "Good Source".into(),
+            s3_uri: "fixtures/focus12".into(),
+            source_type: data::config::SourceType::Auto,
+            aws_region: None,
+            aws_profile: None,
+            role_arn: None,
+        };
+        let broken = data::config::DataSource {
+            id: "broken-source".into(),
+            name: "Broken Source".into(),
+            s3_uri: "fixtures/does-not-exist".into(),
+            source_type: data::config::SourceType::Auto,
+            aws_region: None,
+            aws_profile: None,
+            role_arn: None,
+        };
+        let config = data::config::AppConfig {
+            server: data::config::ServerConfig::default(),
+            sources: vec![good, broken],
+        };
+
+        let repo: Arc<dyn data::queries::summary::CostRepository> =
+            Arc::new(StubRepo { summary: stub_summary() });
+        let mut repos = HashMap::new();
+        repos.insert("good-source".to_string(), repo);
+
+        let source_statuses = vec![
+            crate::state::SourceDiagnostic {
+                id: "good-source".into(),
+                name: "Good Source".into(),
+                configured_type: data::config::SourceType::Auto,
+                status: crate::state::SourceStatus::Registered {
+                    detected_format: "focus12".into(),
+                    file_count: 5,
+                },
+            },
+            crate::state::SourceDiagnostic {
+                id: "broken-source".into(),
+                name: "Broken Source".into(),
+                configured_type: data::config::SourceType::Auto,
+                status: crate::state::SourceStatus::Skipped {
+                    reason: "no Parquet files found via discovery".into(),
+                },
+            },
+        ];
+
+        AppState {
+            config,
+            pools: HashMap::new(),
+            repos,
+            source_statuses,
+        }
+    }
+
+    #[tokio::test]
+    async fn sources_list_returns_200_with_mixed_statuses() {
+        let app = build_router(make_state_with_mixed_sources());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/sources")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // default_source_id mirrors resolve_source(None)'s fallback: the
+        // first configured source, regardless of registration outcome.
+        assert_eq!(json["default_source_id"], "good-source");
+
+        let sources = json["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 2);
+
+        let good = &sources[0];
+        assert_eq!(good["id"], "good-source");
+        assert_eq!(good["name"], "Good Source");
+        assert_eq!(good["configured_type"], "auto");
+        assert_eq!(good["state"], "registered");
+        assert_eq!(good["detected_format"], "focus12");
+        assert_eq!(good["file_count"], 5);
+
+        let broken = &sources[1];
+        assert_eq!(broken["id"], "broken-source");
+        assert_eq!(broken["state"], "skipped");
+        assert_eq!(
+            broken["reason"],
+            "no Parquet files found via discovery"
+        );
+        // Skipped entries carry no detected_format/file_count fields.
+        assert!(broken.get("detected_format").is_none());
+        assert!(broken.get("file_count").is_none());
+    }
+
+    #[tokio::test]
+    async fn sources_list_empty_config_returns_null_default() {
+        let config = data::config::AppConfig {
+            server: data::config::ServerConfig::default(),
+            sources: vec![],
+        };
+        let state = AppState {
+            config,
+            pools: HashMap::new(),
+            repos: HashMap::new(),
+            source_statuses: vec![],
+        };
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/sources")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["default_source_id"], serde_json::Value::Null);
+        assert_eq!(json["sources"], serde_json::json!([]));
     }
 }

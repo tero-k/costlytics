@@ -26,7 +26,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     #[default]
