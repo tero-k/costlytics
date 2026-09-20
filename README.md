@@ -35,3 +35,11 @@ fixture, by `crates/api/tests/http_integration.rs` — run it with:
 ```
 cargo test -p api --test http_integration
 ```
+
+The frontend's Vitest suite covers the pure/shared modules in `web/src/shared/*`
+(URL/DOM round-trips, XSS/CSV-injection regression pins, date math, formatters)
+— run it with:
+
+```
+cd web && npm test
+```
