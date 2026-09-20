@@ -329,6 +329,23 @@ export async function getFilterValues(dimension: FilterValuesDimension): Promise
   return values;
 }
 
+/**
+ * Typed client for `GET /api/v1/filter-values/tag-values?key=X` (distinct
+ * values observed for the given tag key). Separate from `getFilterValues`
+ * since this endpoint takes a required `key` query parameter (`TagValuesQuery`
+ * in `crates/api/src/handlers.rs`'s `filter_values_tag_values` handler,
+ * verified by reading it directly) rather than being a flat
+ * `FilterValuesDimension`, and is thus a two-step fetch (tag-keys, then
+ * tag-values-for-a-key) unlike the single-step pickers `getFilterValues`
+ * serves.
+ */
+export async function getTagValues(key: string): Promise<string[]> {
+  const { values } = await getJson<FilterValuesResponse>(
+    `/api/v1/filter-values/tag-values?key=${encodeURIComponent(key)}`,
+  );
+  return values;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/v1/sources
 // ---------------------------------------------------------------------------
