@@ -3,7 +3,7 @@
  * e.g. the Service Detail or Account Detail page's currently selected
  * service/account. Renders an ECharts line/area chart into a `chart-area`
  * element nested under `#{idPrefix}-trend`, showing total cost over time for
- * the currently selected entity (`{filterKey}: [selected]`), ungrouped
+ * the currently selected entity (`config.buildFilter(selected)`), ungrouped
  * (`group_by` omitted — the entity is already known from the filter, no need
  * to re-group by it) — mirrors `trendChart.ts`'s (Overview page) pattern,
  * including auto-granularity derived from the selected range's length
@@ -162,7 +162,7 @@ export function initEntityTrend(
         end: currentEnd,
         metric: controls.metric,
         granularity,
-        [config.filterKey]: [selected],
+        ...config.buildFilter(selected),
         // group_by omitted -> a single ungrouped series for this entity
       });
 

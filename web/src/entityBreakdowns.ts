@@ -2,7 +2,7 @@
  * Generic secondary breakdowns for a "detail page" entity (plan §26), e.g.
  * the Service Detail page's selected service (cost by account, by region,
  * by charge category) or the Account Detail page's selected account (cost
- * by service, by region), each filtered to `{filterKey}: [selected]`.
+ * by service, by region), each filtered to `config.buildFilter(selected)`.
  *
  * Structurally identical to `topBreakdown.ts`'s horizontal-bar-chart /
  * "Other" bucket pattern (reusing `shared/chart.ts`'s `ensureChart`/overlay
@@ -104,7 +104,7 @@ async function loadChart(
         end,
         metric: controls.metric,
         dimension: def.dimension,
-        [config.filterKey]: [selected],
+        ...config.buildFilter(selected),
         limit: 10,
       }),
       summaryPromise,
@@ -174,7 +174,7 @@ export function initEntityBreakdowns(
       start: controls.startIso,
       end: addDaysIso(controls.endIsoInclusive, 1),
       metric: controls.metric,
-      [config.filterKey]: [selected],
+      ...config.buildFilter(selected),
     });
 
     await Promise.allSettled(

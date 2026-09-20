@@ -5,7 +5,7 @@
  *
  * Renders a simple read-only HTML `<table>` into `#{idPrefix}-top-resources`
  * from `POST /cost/breakdown` with `dimension: "resource"`, filtered to the
- * currently selected entity (`{filterKey}: [selected]`), limited to the top
+ * currently selected entity (`config.buildFilter(selected)`), limited to the top
  * 15 rows by cost. Resource IDs are often long opaque strings (ARNs,
  * instance IDs, etc.), so a table reads better here than a bar chart — see
  * `serviceBreakdowns.ts`'s module doc for that chart-vs-table split.
@@ -118,7 +118,7 @@ export function initEntityTopResources(
         end,
         metric: controls.metric,
         dimension: 'resource',
-        [config.filterKey]: [selected],
+        ...config.buildFilter(selected),
         limit: RESOURCE_LIMIT,
       });
 

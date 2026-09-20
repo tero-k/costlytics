@@ -4,8 +4,8 @@
  *
  * Renders three cards into `#{idPrefix}-kpi` — total cost, row count, and
  * currency — from `POST /cost/summary` filtered to the currently selected
- * entity (`{filterKey}: [selected]`) for the page's shared date range and
- * metric. Reuses the same `.kpi-grid`/`.kpi-card` visual pattern as
+ * entity (`config.buildFilter(selected)`) for the page's shared date range
+ * and metric. Reuses the same `.kpi-grid`/`.kpi-card` visual pattern as
  * `kpiCards.ts` (Overview page).
  *
  * Generalized from `serviceKpi.ts`/`accountKpi.ts` (Session 11) once Session
@@ -131,7 +131,7 @@ export function initEntityKpi(
         start,
         end,
         metric: controls.metric,
-        [config.filterKey]: [selected],
+        ...config.buildFilter(selected),
       });
 
       if (!refreshGuard.isCurrent(token)) return;
