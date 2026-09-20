@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Costlytics — Service Detail</title>
+    <title>Costlytics — Cost Changes</title>
   </head>
   <body>
     <div id="app">
@@ -12,24 +12,26 @@
         <nav class="app-nav">
           <a href="/">Overview</a>
           <a href="/explorer.html">Cost Explorer</a>
-          <a href="/service-detail.html" class="active">Service Detail</a>
+          <a href="/service-detail.html">Service Detail</a>
           <a href="/account-detail.html">Account Detail</a>
-          <a href="/cost-changes.html">Cost Changes</a>
+          <a href="/cost-changes.html" class="active">Cost Changes</a>
         </nav>
         <div class="controls">
           <label class="control">
-            <span>Service</span>
-            <select id="service-picker">
-              <option value="" selected>Select a service&hellip;</option>
-            </select>
-          </label>
-          <label class="control">
-            <span>From</span>
+            <span>Current period from</span>
             <input type="date" id="date-start" />
           </label>
           <label class="control">
-            <span>To</span>
+            <span>Current period to</span>
             <input type="date" id="date-end" />
+          </label>
+          <label class="control">
+            <span>Previous period from</span>
+            <input type="date" id="prev-date-start" />
+          </label>
+          <label class="control">
+            <span>Previous period to</span>
+            <input type="date" id="prev-date-end" />
           </label>
           <label class="control">
             <span>Metric</span>
@@ -38,6 +40,18 @@
               <option value="billed">Billed</option>
               <option value="list">List</option>
               <option value="contracted">Contracted</option>
+            </select>
+          </label>
+          <label class="control">
+            <span>Group by</span>
+            <select id="dimension-select">
+              <option value="service" selected>Service</option>
+              <option value="account">Account</option>
+              <option value="region">Region</option>
+              <option value="availability_zone">Availability zone</option>
+              <option value="charge_category">Charge category</option>
+              <option value="pricing_category">Pricing category</option>
+              <option value="resource">Resource</option>
             </select>
           </label>
         </div>
@@ -51,15 +65,11 @@
         <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
       </div>
       <main>
-        <div class="table-status" id="service-detail-placeholder">Select a service to view details.</div>
-        <div id="service-kpi"></div>
-        <div id="service-trend"></div>
-        <div id="service-by-account"></div>
-        <div id="service-by-region"></div>
-        <div id="service-by-category"></div>
-        <div id="service-top-resources"></div>
+        <div id="changes-summary"></div>
+        <div id="changes-movers"></div>
+        <div id="changes-table"></div>
       </main>
     </div>
-    <script type="module" src="/src/serviceDetailMain.ts"></script>
+    <script type="module" src="/src/costChangesMain.ts"></script>
   </body>
 </html>

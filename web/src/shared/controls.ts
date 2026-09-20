@@ -58,20 +58,59 @@ export function readExplorerControls(): ExplorerControls | null {
 }
 
 /**
+ * Cost Changes page-local extension of {@link Controls}, adding an
+ * INDEPENDENT previous-period date range (`#prev-date-start` /
+ * `#prev-date-end` in `cost-changes.html`) plus the "Group by" dimension
+ * (reusing the same `#dimension-select` id/options list as Explorer's).
+ *
+ * Unlike Explorer's auto-derived previous period (`previousPeriod()`,
+ * recomputed at read-time from the current range), this page's previous
+ * period is read directly from its own DOM inputs so the two ranges can be
+ * set to arbitrary, unrelated spans (e.g. "this month vs. the same month
+ * last year").
+ */
+export interface ChangesControls extends Controls {
+  previousStartIso: string;
+  previousEndIsoInclusive: string;
+  dimension: Dimension;
+}
+
+export function readChangesControls(): ChangesControls | null {
+  const base = readControls();
+  if (!base) return null;
+
+  const prevStartInput = document.querySelector<HTMLInputElement>('#prev-date-start');
+  const prevEndInput = document.querySelector<HTMLInputElement>('#prev-date-end');
+  if (!prevStartInput?.value || !prevEndInput?.value) return null;
+
+  const dimensionSelect = document.querySelector<HTMLSelectElement>('#dimension-select');
+  const dimension = (dimensionSelect?.value as Dimension | undefined) ?? DEFAULT_DIMENSION;
+
+  return {
+    ...base,
+    previousStartIso: prevStartInput.value,
+    previousEndIsoInclusive: prevEndInput.value,
+    dimension,
+  };
+}
+
+/**
  * Subscribes `refresh` to `change` events on the shared date/metric
- * controls (and, for the Cost Explorer page, the dimension/top-N controls
- * too), so every fetching module doesn't have to repeat its own
- * `document.querySelector(...)?.addEventListener('change', ...)` block.
+ * controls (and, for the Cost Explorer page, the dimension/top-N controls;
+ * or for the Cost Changes page, the independent previous-period range and
+ * dimension controls), so every fetching module doesn't have to repeat its
+ * own `document.querySelector(...)?.addEventListener('change', ...)` block.
  *
  * `opts.extraIds` covers page-local controls beyond the shared set (e.g.
  * the Overview page's `#granularity-select`, used only by `trendChart.ts`).
  */
 export function subscribeToControls(
   refresh: () => void,
-  opts?: { explorer?: boolean; extraIds?: string[] },
+  opts?: { explorer?: boolean; changes?: boolean; extraIds?: string[] },
 ): void {
   const ids = ['#date-start', '#date-end', '#metric-select'];
   if (opts?.explorer) ids.push('#dimension-select', '#top-n-input');
+  if (opts?.changes) ids.push('#prev-date-start', '#prev-date-end', '#dimension-select');
   if (opts?.extraIds) ids.push(...opts.extraIds);
 
   for (const id of ids) {
