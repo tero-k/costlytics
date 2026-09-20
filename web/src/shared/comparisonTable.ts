@@ -89,8 +89,6 @@ export interface ComparisonTableOptions<TControls extends ComparisonControls> {
   readControls: () => TControls | null;
   /** Resolves this page's current/previous date range pair from its controls — the one place Explorer and Cost Changes genuinely differ. */
   resolveRanges: (controls: TControls) => ComparisonRanges;
-  /** Registers `refresh` to re-run on this page's own control-change events. Optional: Cost Changes' `costChangesMain.ts` drives refresh centrally instead. */
-  subscribe?: (refresh: () => void) => void;
   /** Called with the fetched result's currency code on each successful load, so the page's status bar can display it (same convention as the KPI-card/chart modules). */
   onCurrency?: (currency: string) => void;
 }
@@ -198,7 +196,7 @@ function sortValue(row: TableRow, column: SortColumn): number | string {
 export function createComparisonTable<TControls extends ComparisonControls>(
   options: ComparisonTableOptions<TControls>,
 ): ComparisonTableHandle {
-  const { containerId, readControls, resolveRanges, subscribe, onCurrency } = options;
+  const { containerId, readControls, resolveRanges, onCurrency } = options;
 
   const refreshGuard = new RequestGuard();
 
@@ -343,8 +341,6 @@ export function createComparisonTable<TControls extends ComparisonControls>(
     const token = refreshGuard.next();
     await loadTable(controls, token);
   };
-
-  subscribe?.(refresh);
 
   function getExportTableData(): { headers: string[]; rows: string[][] } | null {
     if (!lastRows) return null;
