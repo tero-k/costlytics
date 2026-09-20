@@ -28,6 +28,15 @@ Alternatively, point a `[[sources]]` entry at a real FOCUS 1.2 or CUR 2.0
 export directory (FOCUS 1.2 layout:
 `{base}/BILLING_PERIOD=YYYY-MM/{data.parquet,Manifest.json}`).
 
+Every configured `[[sources]]` entry is either registered successfully at
+startup or silently skipped (logged via `tracing::warn!`/`tracing::error!`) —
+`GET /api/v1/sources` makes that visible over HTTP: it returns every
+configured source's id, name, configured type, and either
+`{"state": "registered", "detected_format", "file_count"}` or
+`{"state": "skipped", "reason"}`, plus `default_source_id`, the source id
+that requests without an explicit `source_id` fall back to (the first
+configured source).
+
 The full startup pipeline (partition discovery -> schema detection -> view
 registration -> HTTP query) is exercised end-to-end, against a generated
 fixture, by `crates/api/tests/http_integration.rs` — run it with:

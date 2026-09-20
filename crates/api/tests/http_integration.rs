@@ -326,3 +326,101 @@ async fn http_filter_values_and_compare_over_real_http() {
     assert_eq!(row["previous"], serde_json::json!(0.0));
     assert_eq!(row["percentage_change"], serde_json::Value::Null);
 }
+
+/// End-to-end HTTP integration test for `GET /api/v1/sources` (Session 14,
+/// Task 2): proves that a real multi-source `AppConfig`, run through the
+/// full `build_app` startup path, produces a `sources_list` response whose
+/// per-source `Registered`/`Skipped` shapes reflect what actually happened
+/// at startup — not just the handler-level stub coverage in
+/// `handlers.rs`'s unit tests.
+///
+/// Two sources are configured, deliberately in this order:
+/// 1. `local-good`, a local FOCUS 1.2 fixture directory that registers
+///    successfully (`Registered`).
+/// 2. `s3-broken`, an `s3://`-prefixed source. `build_app` skips S3 sources
+///    unconditionally this session (`DataSource::is_s3` short-circuits
+///    before any discovery/detection I/O runs), so this is a deterministic,
+///    filesystem-independent way to exercise the `Skipped` path over real
+///    HTTP — unlike an empty/nonexistent local directory, which `build_app`
+///    treats as a valid, zero-file `Registered` source (see `lib.rs`'s
+///    `build_app` doc comment on that judgment call), so it would NOT prove
+///    the `Skipped` shape here.
+///
+/// `local-good` is listed first specifically so `default_source_id` is
+/// unambiguous: `resolve_source`'s fallback rule is "the first *configured*
+/// source" (`state.config.sources.first()`), which here also happens to be
+/// the first *registered* one — this ordering choice means the test cannot
+/// accidentally pass by exercising "first registered" instead of "first
+/// configured" semantics.
+#[tokio::test]
+async fn http_sources_list_reflects_configured_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    generate_focus12_fixture(dir.path()).unwrap();
+
+    let config = AppConfig {
+        server: ServerConfig::default(),
+        sources: vec![
+            DataSource {
+                id: "local-good".into(),
+                name: "Local Good Source".into(),
+                s3_uri: dir.path().to_str().unwrap().to_string(),
+                source_type: SourceType::Focus12,
+                aws_region: None,
+                aws_profile: None,
+                role_arn: None,
+            },
+            DataSource {
+                id: "s3-broken".into(),
+                name: "S3 Broken Source".into(),
+                s3_uri: "s3://some-bucket/prefix/".into(),
+                source_type: SourceType::Auto,
+                aws_region: None,
+                aws_profile: None,
+                role_arn: None,
+            },
+        ],
+    };
+
+    let app = build_app(config).expect("build_app should succeed");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/sources")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["default_source_id"], "local-good");
+
+    let sources = json["sources"].as_array().expect("sources must be an array");
+    assert_eq!(sources.len(), 2);
+
+    let good = &sources[0];
+    assert_eq!(good["id"], "local-good");
+    assert_eq!(good["name"], "Local Good Source");
+    assert_eq!(good["configured_type"], "focus12");
+    assert_eq!(good["state"], "registered");
+    assert_eq!(good["detected_format"], "focus12");
+    assert!(
+        good["file_count"].as_u64().unwrap() > 0,
+        "expected local-good to have discovered at least one file, got {}",
+        good["file_count"]
+    );
+    assert!(good.get("reason").is_none());
+
+    let broken = &sources[1];
+    assert_eq!(broken["id"], "s3-broken");
+    assert_eq!(broken["name"], "S3 Broken Source");
+    assert_eq!(broken["configured_type"], "auto");
+    assert_eq!(broken["state"], "skipped");
+    assert_eq!(
+        broken["reason"],
+        "S3 source; S3 discovery not implemented this session"
+    );
+    assert!(broken.get("detected_format").is_none());
+    assert!(broken.get("file_count").is_none());
+}
