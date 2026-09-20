@@ -7,6 +7,7 @@ import { initEntityTrend } from './entityTrend.ts';
 import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
 import { initEntityTopResources } from './entityTopResources.ts';
 import type { EntityConfig } from './shared/entityConfig.ts';
+import { createEntityOrchestrator } from './shared/entityOrchestrator.ts';
 
 /**
  * Generic app shell / orchestrator for a "detail page" entity (plan §26) —
@@ -116,25 +117,15 @@ export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig):
     updatePlaceholderVisibility(initial);
   }
 
-  // Each `init*` call performs its ONE-TIME setup (shell render, own
-  // `RequestGuard`(s), and its single `subscribeToControls` registration)
-  // synchronously and returns a stable `{ refresh }` handle — it does NOT
-  // trigger the initial load itself. `handles` is built exactly once, so
-  // every subsequent `refreshAll()` call (bootstrap AND every later source
-  // switch) reuses the SAME guards and adds NO new control listeners,
-  // unlike the pre-fix version which re-ran these factories (and thus
-  // `subscribeToControls`) on every source switch, leaking listeners and
-  // decoupling old/new in-flight requests' guards from each other.
-  const handles = [
-    initEntityKpi(entityConfig, updateStatusCurrency),
-    initEntityTrend(entityConfig, updateStatusCurrency),
-    initEntityBreakdowns(entityConfig, config.breakdowns, updateStatusCurrency),
-    initEntityTopResources(entityConfig, updateStatusCurrency),
-  ];
-
-  async function refreshAll(): Promise<void> {
-    await Promise.allSettled(handles.map((handle) => handle.refresh()));
-  }
+  // See `shared/entityOrchestrator.ts` for why `inits` is called exactly
+  // once here and `refreshAll` must be reused (not rebuilt) for every later
+  // source switch.
+  const { refreshAll } = createEntityOrchestrator([
+    () => initEntityKpi(entityConfig, updateStatusCurrency),
+    () => initEntityTrend(entityConfig, updateStatusCurrency),
+    () => initEntityBreakdowns(entityConfig, config.breakdowns, updateStatusCurrency),
+    () => initEntityTopResources(entityConfig, updateStatusCurrency),
+  ]);
 
   /**
    * Re-run when the source picker changes: repopulates the entity picker's

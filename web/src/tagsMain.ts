@@ -8,6 +8,7 @@ import { initEntityTrend } from './entityTrend.ts';
 import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
 import { initEntityTopResources } from './entityTopResources.ts';
 import type { EntityConfig } from './shared/entityConfig.ts';
+import { createEntityOrchestrator } from './shared/entityOrchestrator.ts';
 
 /**
  * Entry point for the Costlytics Tags drilldown page (plan §26-27's third
@@ -83,25 +84,17 @@ const entityConfig: EntityConfig = {
   }),
 };
 
-// Each `init*` call performs its ONE-TIME setup (shell render, own
-// `RequestGuard`(s), and its single `subscribeToControls` registration)
-// synchronously and returns a stable `{ refresh }` handle — it does NOT
-// trigger the initial load itself. `handles` is built exactly once, so
-// every subsequent `refreshAll()` call (bootstrap, source switches, AND tag
-// key/value switches) reuses the SAME guards and adds NO new control
-// listeners, matching `entityDetailMain.ts`'s post-Session-14-fix pattern
-// (avoiding that session's exact regression: unbounded listener/request
-// accumulation on repeated switches).
-const handles = [
-  initEntityKpi(entityConfig, updateStatusCurrency),
-  initEntityTrend(entityConfig, updateStatusCurrency),
-  initEntityBreakdowns(entityConfig, TAG_BREAKDOWNS, updateStatusCurrency),
-  initEntityTopResources(entityConfig, updateStatusCurrency),
-];
-
-async function refreshAll(): Promise<void> {
-  await Promise.allSettled(handles.map((handle) => handle.refresh()));
-}
+// See `shared/entityOrchestrator.ts` for why `inits` is called exactly once
+// here and `refreshAll` must be reused (not rebuilt) for every later source
+// or tag key/value switch, matching `entityDetailMain.ts`'s
+// post-Session-14-fix pattern (avoiding that session's exact regression:
+// unbounded listener/request accumulation on repeated switches).
+const { refreshAll } = createEntityOrchestrator([
+  () => initEntityKpi(entityConfig, updateStatusCurrency),
+  () => initEntityTrend(entityConfig, updateStatusCurrency),
+  () => initEntityBreakdowns(entityConfig, TAG_BREAKDOWNS, updateStatusCurrency),
+  () => initEntityTopResources(entityConfig, updateStatusCurrency),
+]);
 
 /**
  * Populates the tag-value picker from `getTagValues(key)`, sorted
