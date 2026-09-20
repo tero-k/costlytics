@@ -6,6 +6,7 @@ import { toCsv, downloadTextFile } from './shared/csv.ts';
 import { initChangesSummary } from './costChangesSummary.ts';
 import { initChangesMovers } from './costChangesMovers.ts';
 import { initChangesTable, getExportTableData } from './costChangesTable.ts';
+import { initSourcePicker } from './shared/sourcePicker.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Cost Changes page.
@@ -95,6 +96,7 @@ async function bootstrap(): Promise<void> {
   initPreviousPeriodDefaults();
   initStatusBar();
   initCsvExport();
+  await initSourcePicker();
   subscribeToControls(refresh, { changes: true });
 
   setLoadingIndicatorVisible(true);

@@ -235,17 +235,65 @@ export class ApiError extends Error {
 // Client
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Active source (Session 14 Task 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Module-level "currently selected source" singleton, set by the shared
+ * source-picker control (`shared/sourcePicker.ts`) on page load and on every
+ * change. This is the SINGLE injection point threading `source_id` into
+ * every outgoing request: `postJson`/`getJson` below merge it in
+ * automatically, so none of the many per-component fetching modules
+ * (`kpiCards.ts`, `trendChart.ts`, `entityKpi.ts`, `costChangesTable.ts`,
+ * etc.) need to read or pass `source_id` themselves. `null` means "no
+ * active source yet / picker unavailable" — requests are sent WITHOUT a
+ * `source_id`, which the backend's own `resolve_source(state, None)`
+ * fallback (first configured source) handles.
+ */
+let activeSourceId: string | null = null;
+
+export function setActiveSourceId(id: string | null): void {
+  activeSourceId = id;
+}
+
+export function getActiveSourceId(): string | null {
+  return activeSourceId;
+}
+
+/**
+ * Merges the active source into a POST request body, UNLESS the caller
+ * already set `source_id` explicitly — an intentional override always wins
+ * over the injected default. (As of this task, no caller does this, but the
+ * precedence is load-bearing for `getSources()`-driven future call sites.)
+ */
+function withActiveSourceId(body: unknown): unknown {
+  if (activeSourceId === null) return body;
+  const record = body as Record<string, unknown>;
+  if (record.source_id !== undefined) return body;
+  return { ...record, source_id: activeSourceId };
+}
+
+/** Same precedence rule as {@link withActiveSourceId}, applied to a GET URL's query string instead of a JSON body. */
+function withActiveSourceIdQuery(path: string): string {
+  if (activeSourceId === null) return path;
+  const url = new URL(path, window.location.origin);
+  if (url.searchParams.has('source_id')) return path;
+  url.searchParams.set('source_id', activeSourceId);
+  return `${url.pathname}${url.search}`;
+}
+
 async function postJson<TResponse>(path: string, body: unknown): Promise<TResponse> {
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withActiveSourceId(body)),
   });
   return parseJsonOrThrow<TResponse>(res);
 }
 
 async function getJson<TResponse>(path: string): Promise<TResponse> {
-  const res = await fetch(path, {
+  const res = await fetch(withActiveSourceIdQuery(path), {
     method: 'GET',
     headers: { 'content-type': 'application/json' },
   });
@@ -279,4 +327,55 @@ export async function getCompare(req: CompareRequest): Promise<CompareResult> {
 export async function getFilterValues(dimension: FilterValuesDimension): Promise<string[]> {
   const { values } = await getJson<FilterValuesResponse>(`/api/v1/filter-values/${dimension}`);
   return values;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/sources
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `crates/api/src/config.rs`'s `SourceType` wire format
+ * (`#[serde(rename_all = "snake_case")]`).
+ */
+export type ConfiguredSourceType = 'auto' | 'cur2' | 'focus10' | 'focus12';
+
+/**
+ * Wire shape of one entry in `GET /api/v1/sources`' `sources` array
+ * (`SourceEntry`/`SourceStatusResponse` in `crates/api/src/handlers.rs`,
+ * `#[serde(tag = "state", rename_all = "snake_case")]`-flattened, so a
+ * single JSON object is either
+ * `{id, name, configured_type, state: "registered", detected_format, file_count}`
+ * or `{id, name, configured_type, state: "skipped", reason}`). Modeled here
+ * as one interface with optional fields (rather than a discriminated union)
+ * since every call site either filters on `state` or displays whichever
+ * fields are present — see Task 4's diagnostics page for the latter.
+ */
+export interface SourceStatus {
+  id: string;
+  name: string;
+  configured_type: ConfiguredSourceType;
+  state: 'registered' | 'skipped';
+  /** Present only when `state === 'registered'`. */
+  detected_format?: string;
+  /** Present only when `state === 'registered'`. */
+  file_count?: number;
+  /** Present only when `state === 'skipped'`. */
+  reason?: string;
+}
+
+export interface SourcesResponse {
+  sources: SourceStatus[];
+  /**
+   * The `source_id` `resolve_source(state, None)` would pick when a request
+   * omits `source_id` — the FIRST configured source, which is not
+   * necessarily registered/queryable (see `handlers.rs`'s doc comment on
+   * this field). Callers that need a SELECTABLE default should instead pick
+   * the first entry with `state === 'registered'` — see
+   * `shared/sourcePicker.ts`.
+   */
+  default_source_id: string | null;
+}
+
+export async function getSources(): Promise<SourcesResponse> {
+  return getJson<SourcesResponse>('/api/v1/sources');
 }

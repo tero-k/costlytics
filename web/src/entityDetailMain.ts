@@ -1,6 +1,7 @@
 import { getFilterValues } from './api.ts';
 import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
 import { createDimensionPicker } from './shared/dimensionPicker.ts';
+import { initSourcePicker } from './shared/sourcePicker.ts';
 import { initEntityKpi } from './entityKpi.ts';
 import { initEntityTrend } from './entityTrend.ts';
 import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
@@ -110,6 +111,7 @@ export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig):
   initDateRangeDefaults();
   initStatusBar();
   picker.init(updatePlaceholderVisibility);
+  await initSourcePicker();
 
   setLoadingIndicatorVisible(true);
   try {

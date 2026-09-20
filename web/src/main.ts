@@ -8,6 +8,7 @@ import {
   setLoadingIndicatorVisible,
   updateStatusCurrency,
 } from './shared/statusBar.ts';
+import { initSourcePicker } from './shared/sourcePicker.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Overview page.
@@ -36,6 +37,10 @@ import {
 async function bootstrap(): Promise<void> {
   initDateRangeDefaults();
   initStatusBar();
+  // Must resolve before any component's first fetch fires (see
+  // `shared/sourcePicker.ts`'s doc comment) — awaited here, ahead of the
+  // `Promise.allSettled` below.
+  await initSourcePicker();
 
   setLoadingIndicatorVisible(true);
   try {

@@ -9,6 +9,7 @@ import { initExplorerTrendChart } from './explorerTrend.ts';
 import { initExplorerTable, getExportTableData } from './explorerTable.ts';
 import { toCsv, downloadTextFile } from './shared/csv.ts';
 import { readExplorerControls } from './shared/controls.ts';
+import { initSourcePicker } from './shared/sourcePicker.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Cost Explorer page.
@@ -60,6 +61,7 @@ async function bootstrap(): Promise<void> {
   initDateRangeDefaults();
   initStatusBar();
   initCsvExport();
+  await initSourcePicker();
 
   setLoadingIndicatorVisible(true);
   try {

@@ -108,6 +108,15 @@ export function readChangesControls(): ChangesControls | null {
  * dimension controls), so every fetching module doesn't have to repeat its
  * own `document.querySelector(...)?.addEventListener('change', ...)` block.
  *
+ * `#source-picker` (Session 14 Task 3) is included UNCONDITIONALLY,
+ * alongside `#date-start`/`#date-end`/`#metric-select`, on every page — like
+ * those three, it's a control every page has (see `shared/sourcePicker.ts`)
+ * and every fetching module must re-fetch on. Including it here, rather
+ * than editing every module's own `subscribeToControls(...)` call site to
+ * add it as an `extraIds` entry, is what lets switching sources re-fetch
+ * every component WITHOUT touching `kpiCards.ts`/`entityKpi.ts`/etc.
+ * (mirrors `api.ts`'s `postJson`/`getJson` choke point for the same reason).
+ *
  * `opts.extraIds` covers page-local controls beyond the shared set (e.g.
  * the Overview page's `#granularity-select`, used only by `trendChart.ts`).
  */
@@ -115,7 +124,7 @@ export function subscribeToControls(
   refresh: () => void,
   opts?: { explorer?: boolean; changes?: boolean; extraIds?: string[] },
 ): void {
-  const ids = ['#date-start', '#date-end', '#metric-select'];
+  const ids = ['#date-start', '#date-end', '#metric-select', '#source-picker'];
   if (opts?.explorer) ids.push('#dimension-select', '#top-n-input');
   if (opts?.changes) ids.push('#prev-date-start', '#prev-date-end', '#dimension-select', '#top-n-input');
   if (opts?.extraIds) ids.push(...opts.extraIds);
