@@ -73,6 +73,8 @@ export interface ChangesControls extends Controls {
   previousStartIso: string;
   previousEndIsoInclusive: string;
   dimension: Dimension;
+  /** "Top N" control (`#top-n-input`, same id/pattern as Explorer's), used by `costChangesTable.ts`'s Top-N + "Other" folding. */
+  topN: number;
 }
 
 export function readChangesControls(): ChangesControls | null {
@@ -86,11 +88,16 @@ export function readChangesControls(): ChangesControls | null {
   const dimensionSelect = document.querySelector<HTMLSelectElement>('#dimension-select');
   const dimension = (dimensionSelect?.value as Dimension | undefined) ?? DEFAULT_DIMENSION;
 
+  const topNInput = document.querySelector<HTMLInputElement>('#top-n-input');
+  const parsedTopN = topNInput?.value ? Number.parseInt(topNInput.value, 10) : NaN;
+  const topN = Number.isFinite(parsedTopN) && parsedTopN > 0 ? parsedTopN : DEFAULT_TOP_N;
+
   return {
     ...base,
     previousStartIso: prevStartInput.value,
     previousEndIsoInclusive: prevEndInput.value,
     dimension,
+    topN,
   };
 }
 
@@ -110,7 +117,7 @@ export function subscribeToControls(
 ): void {
   const ids = ['#date-start', '#date-end', '#metric-select'];
   if (opts?.explorer) ids.push('#dimension-select', '#top-n-input');
-  if (opts?.changes) ids.push('#prev-date-start', '#prev-date-end', '#dimension-select');
+  if (opts?.changes) ids.push('#prev-date-start', '#prev-date-end', '#dimension-select', '#top-n-input');
   if (opts?.extraIds) ids.push(...opts.extraIds);
 
   for (const id of ids) {

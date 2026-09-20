@@ -1,9 +1,11 @@
 import './style.css';
 import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
 import { previousPeriod } from './shared/dates.ts';
-import { subscribeToControls } from './shared/controls.ts';
+import { readChangesControls, subscribeToControls } from './shared/controls.ts';
+import { toCsv, downloadTextFile } from './shared/csv.ts';
 import { initChangesSummary } from './costChangesSummary.ts';
 import { initChangesMovers } from './costChangesMovers.ts';
+import { initChangesTable, getExportTableData } from './costChangesTable.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Cost Changes page.
@@ -25,22 +27,49 @@ import { initChangesMovers } from './costChangesMovers.ts';
  *
  * The summary cards (`#changes-summary`, Task 2), biggest-movers lists
  * (`#changes-movers`, Task 2), and full comparison table (`#changes-table`,
- * Task 3) each register their `init*` function into `refreshers` below —
- * empty for now, filled in by later tasks.
+ * Task 3) each register their `init*` function into `refreshers` below.
  */
 
 /**
  * Component initializers for this page, each returning a promise that
  * resolves once that component's first load has settled (success or
- * failure). Empty in Task 1; Tasks 2-3 push their `init*` functions here.
+ * failure).
  */
 const refreshers: Array<() => Promise<void>> = [
   () => initChangesSummary(updateStatusCurrency),
   () => initChangesMovers(),
+  () => initChangesTable(updateStatusCurrency),
 ];
 
 function refresh(): void {
   void Promise.allSettled(refreshers.map((r) => r()));
+}
+
+/**
+ * CSV export (Task 3): serializes the comparison table's CURRENTLY RENDERED
+ * rows — i.e. whatever sort order is active, same cell text as on screen —
+ * to CSV text and triggers a browser download. Does not re-fetch; if the
+ * table has no data yet (still loading, errored, or empty for the current
+ * filters), the button does nothing rather than exporting a bogus file.
+ * Mirrors `explorerMain.ts`'s `initCsvExport()`.
+ */
+function initCsvExport(): void {
+  const button = document.querySelector<HTMLButtonElement>('#csv-export-btn');
+  if (!button) return;
+
+  button.addEventListener('click', () => {
+    const data = getExportTableData();
+    if (!data) return;
+
+    const csv = toCsv([data.headers, ...data.rows]);
+
+    const controls = readChangesControls();
+    const dimension = controls?.dimension ?? 'export';
+    const dateSuffix = controls ? `_${controls.startIso}_${controls.endIsoInclusive}_vs_${controls.previousStartIso}_${controls.previousEndIsoInclusive}` : '';
+    const filename = `cost-changes_${dimension}${dateSuffix}.csv`;
+
+    downloadTextFile(filename, csv);
+  });
 }
 
 /** Defaults `#prev-date-start`/`#prev-date-end` to the period immediately preceding the current one. */
@@ -60,6 +89,7 @@ async function bootstrap(): Promise<void> {
   initDateRangeDefaults();
   initPreviousPeriodDefaults();
   initStatusBar();
+  initCsvExport();
   subscribeToControls(refresh, { changes: true });
 
   setLoadingIndicatorVisible(true);

@@ -54,6 +54,10 @@
               <option value="resource">Resource</option>
             </select>
           </label>
+          <label class="control">
+            <span>Top N</span>
+            <input type="number" id="top-n-input" min="1" max="50" value="10" />
+          </label>
         </div>
       </header>
       <div class="status-bar" id="status-bar">
@@ -67,7 +71,13 @@
       <main>
         <div id="changes-summary"></div>
         <div id="changes-movers"></div>
-        <div id="changes-table"></div>
+        <section class="chart-section">
+          <div class="chart-header">
+            <h2>Comparison detail</h2>
+            <button type="button" id="csv-export-btn">Export CSV</button>
+          </div>
+          <div id="changes-table"></div>
+        </section>
       </main>
     </div>
     <script type="module" src="/src/costChangesMain.ts"></script>
