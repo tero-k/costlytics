@@ -100,12 +100,17 @@ function setValue(id: string, value: string, sub?: string): void {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/** Handle returned by `initEntityKpi`: a stable, reusable `refresh()` that reuses the same `RequestGuard` and does NOT re-register control listeners on repeat calls. */
+export interface EntityKpiHandle {
+  refresh: () => Promise<void>;
+}
+
 export function initEntityKpi(
   config: EntityConfig,
   onCurrency?: (currency: string) => void,
-): Promise<void> {
+): EntityKpiHandle {
   const container = getContainer(config.idPrefix);
-  if (!container) return Promise.resolve();
+  if (!container) return { refresh: () => Promise.resolve() };
 
   const ids = cardIds(config.idPrefix);
   const refreshGuard = new RequestGuard();
@@ -161,5 +166,5 @@ export function initEntityKpi(
 
   subscribeToControls(refresh, { extraIds: [config.pickerSelector] });
 
-  return refresh();
+  return { refresh };
 }

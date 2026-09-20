@@ -131,15 +131,20 @@ async function loadChart(
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/** Handle returned by `initEntityBreakdowns`: a stable, reusable `refresh()` that reuses the same per-dimension `RequestGuard`s and does NOT re-register control listeners on repeat calls. */
+export interface EntityBreakdownsHandle {
+  refresh: () => Promise<void>;
+}
+
 export function initEntityBreakdowns(
   config: EntityConfig,
   breakdowns: BreakdownDef[],
   onCurrency?: (currency: string) => void,
-): Promise<void> {
+): EntityBreakdownsHandle {
   const defs: ChartState[] = breakdowns
     .filter((def) => getContainer(def.containerId) !== null)
     .map((def) => ({ ...def, guard: new RequestGuard() }));
-  if (defs.length === 0) return Promise.resolve();
+  if (defs.length === 0) return { refresh: () => Promise.resolve() };
 
   for (const def of defs) {
     const container = getContainer(def.containerId);
@@ -182,5 +187,5 @@ export function initEntityBreakdowns(
 
   subscribeToControls(refresh, { extraIds: [config.pickerSelector] });
 
-  return refresh();
+  return { refresh };
 }

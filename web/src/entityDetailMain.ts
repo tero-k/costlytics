@@ -101,12 +101,25 @@ export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig):
     updatePlaceholderVisibility(initial);
   }
 
-  const refreshers: Array<() => Promise<void>> = [
-    () => initEntityKpi(entityConfig, updateStatusCurrency),
-    () => initEntityTrend(entityConfig, updateStatusCurrency),
-    () => initEntityBreakdowns(entityConfig, config.breakdowns, updateStatusCurrency),
-    () => initEntityTopResources(entityConfig, updateStatusCurrency),
+  // Each `init*` call performs its ONE-TIME setup (shell render, own
+  // `RequestGuard`(s), and its single `subscribeToControls` registration)
+  // synchronously and returns a stable `{ refresh }` handle — it does NOT
+  // trigger the initial load itself. `handles` is built exactly once, so
+  // every subsequent `refreshAll()` call (bootstrap AND every later source
+  // switch) reuses the SAME guards and adds NO new control listeners,
+  // unlike the pre-fix version which re-ran these factories (and thus
+  // `subscribeToControls`) on every source switch, leaking listeners and
+  // decoupling old/new in-flight requests' guards from each other.
+  const handles = [
+    initEntityKpi(entityConfig, updateStatusCurrency),
+    initEntityTrend(entityConfig, updateStatusCurrency),
+    initEntityBreakdowns(entityConfig, config.breakdowns, updateStatusCurrency),
+    initEntityTopResources(entityConfig, updateStatusCurrency),
   ];
+
+  async function refreshAll(): Promise<void> {
+    await Promise.allSettled(handles.map((handle) => handle.refresh()));
+  }
 
   /**
    * Re-run when the source picker changes: repopulates the entity picker's
@@ -118,11 +131,13 @@ export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig):
    * after this one — see `initSourcePicker`'s doc comment) fired with.
    * That automatic, stale-entity fetch is a known, harmless transient: each
    * leaf's `RequestGuard` ensures the LATER `refresh()` call triggered here
-   * always wins once it resolves, regardless of arrival order.
+   * always wins once it resolves, regardless of arrival order — and since
+   * `handles` is reused rather than rebuilt, that guard is the SAME guard
+   * the stale, auto-triggered fetch used, so invalidation actually works.
    */
   async function onSourceChange(): Promise<void> {
     await populatePicker();
-    await Promise.allSettled(refreshers.map((refresh) => refresh()));
+    await refreshAll();
   }
 
   initDateRangeDefaults();
@@ -133,7 +148,7 @@ export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig):
   setLoadingIndicatorVisible(true);
   try {
     await populatePicker();
-    await Promise.allSettled(refreshers.map((refresh) => refresh()));
+    await refreshAll();
   } finally {
     setLoadingIndicatorVisible(false);
   }

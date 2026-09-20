@@ -128,12 +128,17 @@ function renderChart(
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/** Handle returned by `initEntityTrend`: a stable, reusable `refresh()` that reuses the same `RequestGuard` and does NOT re-register control listeners on repeat calls. */
+export interface EntityTrendHandle {
+  refresh: () => Promise<void>;
+}
+
 export function initEntityTrend(
   config: EntityConfig,
   onCurrency?: (currency: string) => void,
-): Promise<void> {
+): EntityTrendHandle {
   const container = getContainer(config.idPrefix);
-  if (!container) return Promise.resolve();
+  if (!container) return { refresh: () => Promise.resolve() };
 
   const chartId = `${config.idPrefix}-trend-chart`;
   const refreshGuard = new RequestGuard();
@@ -205,5 +210,5 @@ export function initEntityTrend(
 
   subscribeToControls(refresh, { extraIds: [config.pickerSelector] });
 
-  return refresh();
+  return { refresh };
 }

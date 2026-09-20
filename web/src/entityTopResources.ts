@@ -91,12 +91,17 @@ function renderTable(container: HTMLElement, rows: BreakdownRow[], currency: str
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/** Handle returned by `initEntityTopResources`: a stable, reusable `refresh()` that reuses the same `RequestGuard` and does NOT re-register control listeners on repeat calls. */
+export interface EntityTopResourcesHandle {
+  refresh: () => Promise<void>;
+}
+
 export function initEntityTopResources(
   config: EntityConfig,
   onCurrency?: (currency: string) => void,
-): Promise<void> {
+): EntityTopResourcesHandle {
   const containerOrNull = getContainer(config.idPrefix);
-  if (!containerOrNull) return Promise.resolve();
+  if (!containerOrNull) return { refresh: () => Promise.resolve() };
   const container = containerOrNull;
 
   const refreshGuard = new RequestGuard();
@@ -149,5 +154,5 @@ export function initEntityTopResources(
 
   subscribeToControls(refresh, { extraIds: [config.pickerSelector] });
 
-  return refresh();
+  return { refresh };
 }
