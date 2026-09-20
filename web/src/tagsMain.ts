@@ -1,8 +1,13 @@
 import './style.css';
 import { getFilterValues, getTagValues } from './api.ts';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible } from './shared/statusBar.ts';
+import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
 import { createDimensionPicker } from './shared/dimensionPicker.ts';
 import { initSourcePicker } from './shared/sourcePicker.ts';
+import { initEntityKpi } from './entityKpi.ts';
+import { initEntityTrend } from './entityTrend.ts';
+import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
+import { initEntityTopResources } from './entityTopResources.ts';
+import type { EntityConfig } from './shared/entityConfig.ts';
 
 /**
  * Entry point for the Costlytics Tags drilldown page (plan §26-27's third
@@ -23,16 +28,42 @@ import { initSourcePicker } from './shared/sourcePicker.ts';
  * the value picker on every key change is safe: no accumulating/duplicate
  * `<option>`s.
  *
- * This task builds the page shell and two-level picker only. `#tags-kpi`,
- * `#tags-trend`, `#tags-breakdowns` are empty containers wired up by a later
- * task (Session 15 Task 3), which will build a `tags`-specific `EntityConfig`
- * (`shared/entityConfig.ts`) whose `getSelected()` returns the current tag
- * VALUE and whose `buildFilter` reads the CURRENT key selection at call time
- * (`(selected) => ({ tags: [{ key: keyPicker.getSelected() ?? '', operator:
- * 'eq', values: [selected] }] })`), reusing the same generic
- * `initEntityKpi`/`initEntityTrend`/`initEntityBreakdowns` leaf modules
- * Service/Account Detail already share.
+ * Session 15 Task 3: reuses the SAME generic `initEntityKpi`/`initEntityTrend`/
+ * `initEntityBreakdowns`/`initEntityTopResources` leaf modules Service/Account
+ * Detail already share (Task 1's `buildFilter`-based `EntityConfig`). This
+ * page's `EntityConfig.getSelected()` returns the current tag VALUE (or
+ * `null` if either picker is unset), and `buildFilter` reads the CURRENT key
+ * selection at call time (`keyPicker.getSelected()`, not a value captured
+ * once at setup) since the key can change independently of the value.
+ *
+ * `EntityConfig.pickerSelector` only covers `#tag-value-picker`: each leaf
+ * component's own `subscribeToControls(refresh, { extraIds: [pickerSelector] })`
+ * listens for native `change` events, which only fire when the USER directly
+ * changes a `<select>` — `dimensionPicker.ts`'s `populateOptions` sets
+ * `.value` programmatically and does NOT dispatch `change`. So a tag-KEY
+ * change (which reprograms the value picker's options/selection without user
+ * interaction on that element) can't rely on that same mechanism; instead
+ * `onKeyChange` below explicitly calls `refreshAll()` after repopulating the
+ * value picker, mirroring `entityDetailMain.ts`'s `onSourceChange` pattern
+ * exactly (repopulate a picker, THEN explicitly refresh every leaf
+ * component) rather than introducing a second, different orchestration
+ * shape for what is structurally the same problem.
+ *
+ * Breakdowns: service, account, and region — "what's driving cost under this
+ * tag", mirroring the dimensions Service Detail asks of accounts/regions and
+ * Account Detail asks of services/regions. Top resources under the selected
+ * tag value is also included (`initEntityTopResources`): a tag can span many
+ * services/resources, so seeing which specific resources dominate its cost
+ * is at least as useful here as it is for a single service/account, and the
+ * component is a pure reuse (one more `init*` call plus one more container
+ * div) with no new logic to justify leaving it out.
  */
+
+const TAG_BREAKDOWNS: BreakdownDef[] = [
+  { containerId: 'tags-by-service', dimension: 'service', title: 'Cost by service' },
+  { containerId: 'tags-by-account', dimension: 'account', title: 'Cost by account' },
+  { containerId: 'tags-by-region', dimension: 'region', title: 'Cost by region' },
+];
 
 const keyPicker = createDimensionPicker({ paramName: 'tag_key', elementId: 'tag-key-picker' });
 const valuePicker = createDimensionPicker({ paramName: 'tag_value', elementId: 'tag-value-picker' });
@@ -40,6 +71,36 @@ const valuePicker = createDimensionPicker({ paramName: 'tag_value', elementId: '
 function updatePlaceholderVisibility(): void {
   const placeholder = document.querySelector<HTMLElement>('#tags-placeholder');
   if (placeholder) placeholder.hidden = keyPicker.getSelected() !== null && valuePicker.getSelected() !== null;
+}
+
+const entityConfig: EntityConfig = {
+  entityNoun: 'tag value',
+  idPrefix: 'tags',
+  pickerSelector: '#tag-value-picker',
+  getSelected: () => (keyPicker.getSelected() === null ? null : valuePicker.getSelected()),
+  buildFilter: (selected) => ({
+    tags: [{ key: keyPicker.getSelected() ?? '', operator: 'eq', values: [selected] }],
+  }),
+};
+
+// Each `init*` call performs its ONE-TIME setup (shell render, own
+// `RequestGuard`(s), and its single `subscribeToControls` registration)
+// synchronously and returns a stable `{ refresh }` handle — it does NOT
+// trigger the initial load itself. `handles` is built exactly once, so
+// every subsequent `refreshAll()` call (bootstrap, source switches, AND tag
+// key/value switches) reuses the SAME guards and adds NO new control
+// listeners, matching `entityDetailMain.ts`'s post-Session-14-fix pattern
+// (avoiding that session's exact regression: unbounded listener/request
+// accumulation on repeated switches).
+const handles = [
+  initEntityKpi(entityConfig, updateStatusCurrency),
+  initEntityTrend(entityConfig, updateStatusCurrency),
+  initEntityBreakdowns(entityConfig, TAG_BREAKDOWNS, updateStatusCurrency),
+  initEntityTopResources(entityConfig, updateStatusCurrency),
+];
+
+async function refreshAll(): Promise<void> {
+  await Promise.allSettled(handles.map((handle) => handle.refresh()));
 }
 
 /**
@@ -86,15 +147,30 @@ async function populateKeyPicker(): Promise<string | null> {
 }
 
 /**
+ * Re-run when the tag-KEY picker changes: repopulates the tag-VALUE
+ * picker's option list for the new key (see module doc comment for why this
+ * can't rely on `subscribeToControls`'s native `change`-event mechanism),
+ * THEN explicitly re-invokes every leaf component's `refresh()` so they
+ * fetch with the new key/value pair rather than the stale one. Mirrors
+ * `entityDetailMain.ts`'s `onSourceChange`.
+ */
+async function onKeyChange(value: string | null): Promise<void> {
+  await populateValuePicker(value);
+  updatePlaceholderVisibility();
+  await refreshAll();
+}
+
+/**
  * Re-run when the source picker changes: both the tag-key and tag-value
- * lists are source-relative, so both pickers are fully repopulated (mirrors
- * `entityDetailMain.ts`'s `onSourceChange`, minus the leaf-component
- * `refreshAll()` this task doesn't yet have).
+ * lists are source-relative, so both pickers are fully repopulated, then
+ * every leaf component is explicitly refreshed with the new source's
+ * resolved key/value — mirrors `entityDetailMain.ts`'s `onSourceChange`.
  */
 async function onSourceChange(): Promise<void> {
   const key = await populateKeyPicker();
   await populateValuePicker(key);
   updatePlaceholderVisibility();
+  await refreshAll();
 }
 
 async function bootstrap(): Promise<void> {
@@ -102,11 +178,14 @@ async function bootstrap(): Promise<void> {
   initStatusBar();
 
   keyPicker.init((value) => {
-    void (async () => {
-      await populateValuePicker(value);
-      updatePlaceholderVisibility();
-    })();
+    void onKeyChange(value);
   });
+  // The value picker's own `change` listener (registered here) only handles
+  // URL sync / placeholder visibility for USER-driven selections; the actual
+  // refresh for that case is already covered by each leaf component's own
+  // `subscribeToControls(refresh, { extraIds: ['#tag-value-picker'] })`
+  // listener (registered independently in each `init*` call above) — same
+  // division of responsibility Service/Account Detail's single picker uses.
   valuePicker.init(updatePlaceholderVisibility);
 
   await initSourcePicker(onSourceChange);
@@ -116,6 +195,7 @@ async function bootstrap(): Promise<void> {
     const initialKey = await populateKeyPicker();
     await populateValuePicker(initialKey);
     updatePlaceholderVisibility();
+    await refreshAll();
   } finally {
     setLoadingIndicatorVisible(false);
   }
