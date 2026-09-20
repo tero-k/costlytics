@@ -108,10 +108,27 @@ export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig):
     () => initEntityTopResources(entityConfig, updateStatusCurrency),
   ];
 
+  /**
+   * Re-run when the source picker changes: repopulates the entity picker's
+   * option list from the NEW source's `getFilterValues` (so it stops
+   * showing the old source's entities) and resolves/URL-syncs the
+   * selection, THEN re-invokes every leaf component's `refresh()` so they
+   * end up fetching with the corrected, new-source-relative entity rather
+   * than the stale one their own `#source-picker` listener (registered
+   * after this one — see `initSourcePicker`'s doc comment) fired with.
+   * That automatic, stale-entity fetch is a known, harmless transient: each
+   * leaf's `RequestGuard` ensures the LATER `refresh()` call triggered here
+   * always wins once it resolves, regardless of arrival order.
+   */
+  async function onSourceChange(): Promise<void> {
+    await populatePicker();
+    await Promise.allSettled(refreshers.map((refresh) => refresh()));
+  }
+
   initDateRangeDefaults();
   initStatusBar();
   picker.init(updatePlaceholderVisibility);
-  await initSourcePicker();
+  await initSourcePicker(onSourceChange);
 
   setLoadingIndicatorVisible(true);
   try {

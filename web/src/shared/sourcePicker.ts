@@ -53,7 +53,9 @@
 import { getSources, setActiveSourceId } from '../api.ts';
 import { createDimensionPicker } from './dimensionPicker.ts';
 
-export async function initSourcePicker(): Promise<void> {
+export async function initSourcePicker(
+  onSourceChange?: (sourceId: string | null) => void,
+): Promise<void> {
   const picker = createDimensionPicker({ paramName: 'source', elementId: 'source-picker' });
 
   let ids: string[] = [];
@@ -81,7 +83,19 @@ export async function initSourcePicker(): Promise<void> {
   // because DOM listeners fire in registration order and this page's
   // `initSourcePicker()` call always completes (this function is `await`ed)
   // before any component's `subscribeToControls(...)` call runs.
+  //
+  // `onSourceChange`, if given, is invoked from INSIDE this same listener,
+  // right after `setActiveSourceId` — this guarantees it runs (and any
+  // `await` inside it starts) before every leaf component's OWN
+  // `#source-picker` listener has a chance to run its `change` handler
+  // synchronously to completion, since this listener was registered first
+  // (see `entityDetailMain.ts`, which `await`s `initSourcePicker()` before
+  // its leaf components' `subscribeToControls` calls run). It's used by
+  // pages (e.g. Service/Account Detail) that own an entity picker whose
+  // option list/selection is source-dependent and must be refreshed before
+  // those components' automatic re-fetch is allowed to be treated as final.
   picker.init((value) => {
     setActiveSourceId(value);
+    onSourceChange?.(value);
   });
 }

@@ -87,6 +87,16 @@ export function createDimensionPicker(config: DimensionPickerConfig): DimensionP
     const picker = getElement();
     if (!picker) return null;
 
+    // Remove any options from a PRIOR `populateOptions` call before
+    // appending the new list, so calling this repeatedly (e.g. after a
+    // source switch) replaces rather than duplicates the option list. Each
+    // page's own static placeholder option (`<option value="" selected>...`,
+    // defined in the page's HTML, not here) has an empty `value` and is
+    // deliberately preserved.
+    for (const option of Array.from(picker.querySelectorAll('option'))) {
+      if (option.value !== '') option.remove();
+    }
+
     const fragment = document.createDocumentFragment();
     for (const value of sortedValues) {
       const option = document.createElement('option');
