@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { formatCurrency, formatCurrencyCompact } from '../format.ts';
+import { changeClass, errorMessage, formatCurrency, formatCurrencyCompact, formatPercent, formatSignedCurrency } from '../format.ts';
+import { ApiError } from '../../api.ts';
 
 // `sanitizeCurrencyForFallback` is not exported — it's only reachable via
 // `formatCurrency`/`formatCurrencyCompact`'s catch-fallback path, which
@@ -63,5 +64,100 @@ describe('formatCurrency fallback currency sanitization (sanitizeCurrencyForFall
     const result = formatCurrency(1, currency);
     expect(result).not.toContain(currency);
     expect(result).toBe('1.00');
+  });
+});
+
+describe('formatCurrency / formatCurrencyCompact happy path', () => {
+  it('formats a normal positive value with a valid currency code', () => {
+    expect(formatCurrency(1234.5, 'USD')).toBe(
+      new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(1234.5),
+    );
+  });
+
+  it('formats a compact value with a valid currency code', () => {
+    expect(formatCurrencyCompact(1234500, 'USD')).toBe(
+      new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency: 'USD',
+        notation: 'compact',
+        maximumFractionDigits: 1,
+      }).format(1234500),
+    );
+  });
+
+  it('formats zero without throwing', () => {
+    expect(formatCurrency(0, 'USD')).toMatch(/0/);
+  });
+});
+
+describe('formatPercent', () => {
+  it('prefixes a positive percentage with +', () => {
+    expect(formatPercent(37.2)).toBe('+37.2%');
+  });
+
+  it('does not prefix a negative percentage (the minus sign is already there)', () => {
+    expect(formatPercent(-12.34)).toBe('-12.3%');
+  });
+
+  it('does not prefix zero', () => {
+    expect(formatPercent(0)).toBe('0.0%');
+  });
+
+  it('rounds to one decimal place', () => {
+    expect(formatPercent(10.05)).toBe('+10.1%');
+  });
+});
+
+describe('formatSignedCurrency', () => {
+  it('prefixes a positive value with + and formats the absolute value', () => {
+    expect(formatSignedCurrency(50, 'USD')).toBe(`+${formatCurrency(50, 'USD')}`);
+  });
+
+  it('prefixes a negative value with - and formats the absolute value (not double-negative)', () => {
+    const result = formatSignedCurrency(-50, 'USD');
+    expect(result).toBe(`-${formatCurrency(50, 'USD')}`);
+    expect(result).not.toContain('--');
+  });
+
+  it('does not prefix zero', () => {
+    expect(formatSignedCurrency(0, 'USD')).toBe(formatCurrency(0, 'USD'));
+  });
+});
+
+describe('changeClass', () => {
+  it('classifies a positive change (cost increase) as bad', () => {
+    expect(changeClass(1)).toBe('change-bad');
+  });
+
+  it('classifies a negative change (cost decrease) as good', () => {
+    expect(changeClass(-1)).toBe('change-good');
+  });
+
+  it('classifies zero change as neutral', () => {
+    expect(changeClass(0)).toBe('change-neutral');
+  });
+});
+
+describe('errorMessage', () => {
+  it('extracts the message from a real Error', () => {
+    expect(errorMessage(new Error('boom'))).toBe('boom');
+  });
+
+  it('extracts the message from an ApiError (which also extends Error)', () => {
+    const err = new ApiError(404, { error: 'not found' });
+    expect(errorMessage(err)).toBe('not found');
+  });
+
+  it('falls back to "Unknown error" for a plain string thrown value', () => {
+    expect(errorMessage('some string')).toBe('Unknown error');
+  });
+
+  it('falls back to "Unknown error" for an unknown object shape', () => {
+    expect(errorMessage({ foo: 'bar' })).toBe('Unknown error');
+  });
+
+  it('falls back to "Unknown error" for null/undefined', () => {
+    expect(errorMessage(null)).toBe('Unknown error');
+    expect(errorMessage(undefined)).toBe('Unknown error');
   });
 });
