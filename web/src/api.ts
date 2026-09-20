@@ -334,7 +334,7 @@ export async function getFilterValues(dimension: FilterValuesDimension): Promise
 // ---------------------------------------------------------------------------
 
 /**
- * Mirrors `crates/api/src/config.rs`'s `SourceType` wire format
+ * Mirrors `crates/data/src/config.rs`'s `SourceType` wire format
  * (`#[serde(rename_all = "snake_case")]`).
  */
 export type ConfiguredSourceType = 'auto' | 'cur2' | 'focus10' | 'focus12';

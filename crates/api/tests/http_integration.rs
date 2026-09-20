@@ -346,12 +346,17 @@ async fn http_filter_values_and_compare_over_real_http() {
 ///    `build_app` doc comment on that judgment call), so it would NOT prove
 ///    the `Skipped` shape here.
 ///
-/// `local-good` is listed first specifically so `default_source_id` is
-/// unambiguous: `resolve_source`'s fallback rule is "the first *configured*
-/// source" (`state.config.sources.first()`), which here also happens to be
-/// the first *registered* one — this ordering choice means the test cannot
-/// accidentally pass by exercising "first registered" instead of "first
-/// configured" semantics.
+/// `local-good` is listed first so this test proves SOMETHING about
+/// `default_source_id`'s exact value, but note this ordering does NOT by
+/// itself distinguish "first configured" from "first registered" semantics:
+/// `local-good` happens to be both here, so a hypothetical "first
+/// registered" implementation would pass this assertion too. The real
+/// distinguishing case (an unregistered source listed first) is documented
+/// but not exercised as its own test — `resolve_source`'s actual fallback
+/// rule ("first *configured* source", `state.config.sources.first()`, which
+/// may point at a Skipped source) is what `handlers.rs`'s `SourcesResponse`
+/// doc comment specifies and this test's assertion happens to be consistent
+/// with, not what this specific fixture ordering proves in isolation.
 #[tokio::test]
 async fn http_sources_list_reflects_configured_sources() {
     let dir = tempfile::tempdir().unwrap();
