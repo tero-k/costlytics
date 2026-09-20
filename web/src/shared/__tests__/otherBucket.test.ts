@@ -58,42 +58,41 @@ describe('buildRowsWithOther', () => {
 
   // --- Negative overall total (credits/refunds) -----------------------------
   //
-  // `buildRowsWithOther`'s epsilon check is:
-  //   remainder > overallTotal * OTHER_EPSILON_FRACTION
-  // For a POSITIVE overallTotal, the right-hand side is a small positive
-  // number, so this correctly requires the remainder to be a non-trivial
-  // positive gap before adding "Other".
-  //
-  // For a NEGATIVE overallTotal (e.g. a period dominated by credits/refunds),
-  // the right-hand side becomes a small NEGATIVE number close to zero
-  // (e.g. -1000 * 0.001 = -1), while `remainder` itself is deeply negative
-  // (e.g. -900) when the rows only account for a small slice of the total.
-  // `-900 > -1` is false, so the epsilon check silently fails to add an
-  // "Other" bucket even though the unaccounted remainder is 90% of the
-  // total. This reproduces CURRENT (buggy) behavior — see the report for
-  // this session; this is NOT the behavior a correct epsilon comparison
-  // would produce (which would need to compare against `Math.abs(overallTotal)`).
-  it('CURRENT BEHAVIOR (possible bug): with a negative overall total, a large unaccounted remainder does NOT produce an "Other" bucket', () => {
+  // `buildRowsWithOther`'s epsilon check compares magnitudes on both sides:
+  //   Math.abs(remainder) > Math.abs(overallTotal) * OTHER_EPSILON_FRACTION
+  // This holds symmetrically regardless of overallTotal's sign. A prior
+  // version of this check (`remainder > overallTotal * OTHER_EPSILON_FRACTION`,
+  // no `Math.abs`) was asymmetric: for a NEGATIVE overallTotal (e.g. a period
+  // dominated by credits/refunds), the right-hand side became a small
+  // NEGATIVE number close to zero (e.g. -1000 * 0.001 = -1), while `remainder`
+  // itself could be deeply negative (e.g. -900) when the rows only accounted
+  // for a small slice of the total — `-900 > -1` was false, so the old check
+  // silently failed to add an "Other" bucket even though the unaccounted
+  // remainder was 90% of the total. Fixed; these tests now pin the correct
+  // symmetric behavior.
+  it('with a negative overall total, a large unaccounted remainder DOES produce an "Other" bucket', () => {
     const overallTotal = -1000; // e.g. large refund/credit period
     const rows = [row('Refund adjustment', -100)]; // only accounts for 10% of the credit
     const remainder = overallTotal - -100; // -900
     expect(remainder).toBe(-900);
-    // Sanity-check the epsilon threshold used internally: -1000 * 0.001 = -1.
-    expect(overallTotal * OTHER_EPSILON_FRACTION).toBe(-1);
+    // Sanity-check the (now-symmetric) epsilon threshold: |-1000| * 0.001 = 1.
+    expect(Math.abs(overallTotal) * OTHER_EPSILON_FRACTION).toBe(1);
 
     const result = buildRowsWithOther(rows, overallTotal);
     // A -900 remainder against a -1000 total is a huge (90%) unaccounted
-    // chunk, so a correct implementation would be expected to surface an
-    // "Other" bucket here. It does not: the epsilon comparison's sign
-    // handling inverts for negative totals, so no "Other" row is added.
-    expect(result).toEqual([{ label: 'Refund adjustment', total: -100 }]);
+    // chunk, so it correctly surfaces as an "Other" bucket carrying the
+    // remaining (negative) amount.
+    expect(result).toEqual([
+      { label: 'Refund adjustment', total: -100 },
+      { label: 'Other', total: -900 },
+    ]);
   });
 
-  it('CURRENT BEHAVIOR (possible bug): with a negative overall total, a small negative remainder (rows overshoot the credit) DOES produce an "Other" bucket', () => {
+  it('with a negative overall total, a small negative remainder (rows overshoot the credit) DOES produce an "Other" bucket', () => {
     const overallTotal = -1000;
     // Rows sum to MORE negative than the total (overshoot by 50), so
     // remainder = overallTotal - sumOfRows = -1000 - (-1050) = 50, which is
-    // positive and comfortably greater than the (-1) threshold.
+    // well above the (now-positive) 1 threshold in absolute terms.
     const rows = [row('Refund adjustment', -1050)];
     const result = buildRowsWithOther(rows, overallTotal);
     expect(result).toEqual([

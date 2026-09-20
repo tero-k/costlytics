@@ -29,7 +29,10 @@ export function buildRowsWithOther(rows: BreakdownRow[], overallTotal: number): 
 
   const sumOfRows = rows.reduce((acc, row) => acc + row.total, 0);
   const remainder = overallTotal - sumOfRows;
-  if (remainder > overallTotal * OTHER_EPSILON_FRACTION) {
+  // Compare magnitudes on both sides so this holds symmetrically for a
+  // negative overallTotal (credit/refund-dominated periods) too — see
+  // otherBucket.test.ts for the negative-total regression this fixes.
+  if (Math.abs(remainder) > Math.abs(overallTotal) * OTHER_EPSILON_FRACTION) {
     result.push({ label: 'Other', total: remainder });
   }
 
