@@ -1,6 +1,6 @@
 import './style.css';
 import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
-import { previousPeriod } from './shared/dates.ts';
+import { addDaysIso, previousPeriod } from './shared/dates.ts';
 import { readChangesControls, subscribeToControls } from './shared/controls.ts';
 import { toCsv, downloadTextFile } from './shared/csv.ts';
 import { initChangesSummary } from './costChangesSummary.ts';
@@ -80,9 +80,14 @@ function initPreviousPeriodDefaults(): void {
   const prevEndInput = document.querySelector<HTMLInputElement>('#prev-date-end');
   if (!startInput?.value || !endInput?.value || !prevStartInput || !prevEndInput) return;
 
-  const previous = previousPeriod(startInput.value, endInput.value);
+  // `previousPeriod()` takes/returns an EXCLUSIVE end, but `#date-end`/
+  // `#prev-date-end` are INCLUSIVE (same convention as every other date
+  // input in the app — see `Controls.endIsoInclusive`), so both ends need
+  // the +1/-1 day conversion at this boundary, exactly like `kpiCards.ts`
+  // and `explorerTable.ts`'s calls do.
+  const previous = previousPeriod(startInput.value, addDaysIso(endInput.value, 1));
   prevStartInput.value = previous.start;
-  prevEndInput.value = previous.end;
+  prevEndInput.value = addDaysIso(previous.end, -1);
 }
 
 async function bootstrap(): Promise<void> {
