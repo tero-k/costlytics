@@ -19,3 +19,15 @@ id = "local-cur2"
 name = "Local CUR 2.0 fixture"
 s3_uri = "fixtures/cur2"
 source_type = "cur2"
+
+# Deliberately unregistered: S3 discovery is not implemented this session
+# (see `crates/api/src/lib.rs::build_app`), so any `s3://`-prefixed source
+# always ends up `Skipped` with a deterministic reason. Kept in the shipped
+# example config (Session 14 Task 4) so the Data Sources diagnostics page
+# demonstrates a real Skipped row out of the box, without requiring anyone
+# running the demo fixtures to hand-edit this file first.
+[[sources]]
+id = "s3-example"
+name = "Example S3 source (not implemented this session)"
+s3_uri = "s3://example-bucket/focus/"
+source_type = "auto"

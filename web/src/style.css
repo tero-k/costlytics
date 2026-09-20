@@ -260,7 +260,8 @@ main {
   padding: var(--spacing);
 }
 
-#explorer-table {
+#explorer-table,
+#data-sources-table {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
@@ -305,6 +306,20 @@ main {
 
 .explorer-table th:hover {
   color: var(--color-text);
+}
+
+/**
+ * `.static-table` (Data Sources diagnostics page): a plain, non-sortable
+ * `.explorer-table` — no click handlers are attached to its `<th>`s, so the
+ * generic pointer-cursor/hover-highlight affordance above (which implies
+ * "clickable to sort") is suppressed for it.
+ */
+.static-table th {
+  cursor: default;
+}
+
+.static-table th:hover {
+  color: var(--color-text-muted);
 }
 
 .explorer-table tbody tr:last-child td {
