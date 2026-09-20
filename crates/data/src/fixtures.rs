@@ -518,7 +518,11 @@ const DEMO_ACCOUNTS: &[&str] = &["acct-101", "acct-102", "acct-103"];
 ///
 /// Produces one row per (service, account) pair across August 2026 (22
 /// services x 3 accounts = 66 rows), plus a handful of rows with a NULL
-/// `ServiceName` to exercise the `(none)` breakdown label.
+/// `ServiceName` to exercise the `(none)` breakdown label. Every real row
+/// also carries `Environment` (production/staging/development) and `Team`
+/// (Platform/Data/Frontend/Security) tags, cycling deterministically by
+/// service/account index, so the Tags drilldown has real, non-empty data
+/// to demonstrate against; the two untagged rows stay untagged (NULL Tags).
 pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("LOAD parquet;")?;
@@ -528,6 +532,14 @@ pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
     let parquet_path = dir.join("data.parquet");
     let parquet_str = parquet_path.to_str().unwrap().replace('\\', "/");
 
+    // Two cross-cutting tag keys applied deterministically to every real
+    // (non-untagged) row, so the Tags drilldown page has genuine multi-key,
+    // multi-value data to browse: `Environment` (production/staging/
+    // development) cycles by the combined service+account index, and `Team`
+    // cycles by service index, giving each value several rows behind it.
+    const DEMO_ENVIRONMENTS: &[&str] = &["production", "staging", "development"];
+    const DEMO_TEAMS: &[&str] = &["Platform", "Data", "Frontend", "Security"];
+
     let mut rows: Vec<String> = Vec::new();
     let mut counter: i64 = 0;
     for (svc_idx, service) in DEMO_SERVICES.iter().enumerate() {
@@ -536,8 +548,11 @@ pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
             let base_cost = 40.0 + (svc_idx as f64) * 23.5 + (acct_idx as f64) * 11.0;
             let billed = (base_cost * 0.92 * 100.0).round() / 100.0;
             let resource_id = format!("res-{svc_idx}-{acct_idx}");
+            let environment = DEMO_ENVIRONMENTS[(svc_idx + acct_idx) % DEMO_ENVIRONMENTS.len()];
+            let team = DEMO_TEAMS[svc_idx % DEMO_TEAMS.len()];
+            let tags = format!("map {{'Environment': '{environment}', 'Team': '{team}'}}");
             rows.push(format!(
-                "('{service}', '{account}', '{resource_id}', {day}, {base_cost}, {billed})",
+                "('{service}', '{account}', '{resource_id}', {day}, {base_cost}, {billed}, {tags})",
             ));
             counter += 1;
         }
@@ -545,10 +560,17 @@ pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
 
     // A few rows with a NULL ServiceName (untagged/uncategorized spend),
     // spread across a couple of accounts, so the breakdown's `(none)` label
-    // has real data behind it.
+    // has real data behind it. These stay genuinely untagged (NULL Tags
+    // too), which is realistic: some cost sits outside any tag.
     let none_rows: Vec<String> = vec![
-        format!("(NULL, '{}', 'res-untagged-1', 3, 275.00, 250.00)", DEMO_ACCOUNTS[0]),
-        format!("(NULL, '{}', 'res-untagged-2', 18, 140.50, 129.00)", DEMO_ACCOUNTS[2]),
+        format!(
+            "(NULL, '{}', 'res-untagged-1', 3, 275.00, 250.00, NULL::MAP(VARCHAR, VARCHAR))",
+            DEMO_ACCOUNTS[0]
+        ),
+        format!(
+            "(NULL, '{}', 'res-untagged-2', 18, 140.50, 129.00, NULL::MAP(VARCHAR, VARCHAR))",
+            DEMO_ACCOUNTS[2]
+        ),
     ];
     rows.extend(none_rows);
 
@@ -559,7 +581,7 @@ pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
             WITH t AS (
               SELECT * FROM (VALUES
                 {values_sql}
-              ) AS t(service_name, account_id, resource_id, day, effective_cost, billed_cost)
+              ) AS t(service_name, account_id, resource_id, day, effective_cost, billed_cost, tags)
             )
             SELECT
                 TIMESTAMP '2026-08-01 00:00:00' AS BillingPeriodStart,
@@ -592,7 +614,7 @@ pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
                 effective_cost * 1.15 AS ListCost,
                 effective_cost * 1.05 AS ContractedCost,
                 'USD'           AS BillingCurrency,
-                NULL::MAP(VARCHAR, VARCHAR) AS Tags,
+                tags            AS Tags,
                 NULL::VARCHAR   AS CommitmentDiscountId,
                 NULL::VARCHAR   AS CommitmentDiscountType,
                 NULL::VARCHAR   AS CommitmentDiscountStatus,
