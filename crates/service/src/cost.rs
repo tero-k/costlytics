@@ -493,7 +493,7 @@ pub fn tag_values(registry: &SourceRegistry, query: TagValuesQuery) -> Result<Fi
         .map_err(|e| query_error("distinct_tag_values", e))
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::register::Registered;
