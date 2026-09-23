@@ -59,9 +59,12 @@ for (const { path, activeHref, title } of PAGES) {
     // state (`.error` on KPI cards, `.table-error`/`.chart-error` on
     // tables/charts — see `web/src/shared/{kpiCard,comparisonTable,chart}.ts`)
     // rather than thrown, so they would NOT show up as a console/pageerror
-    // above. This assertion is what actually makes the smoke test fail
-    // loudly against a broken/empty backend (missing fixtures, backend down,
-    // 500s, etc.) instead of silently passing.
+    // above. This assertion makes the smoke test fail on a backend that is
+    // down or returning errors. It does NOT catch an empty/missing-fixture
+    // backend: this test uses each page's default date range, which doesn't
+    // overlap the Aug 2026 fixtures, so pages legitimately render empty
+    // states here. The data-bearing specs (entity-switching, comparison-table,
+    // failure-isolation) set an explicit Aug 2026 range and cover that case.
     const errorStates = page.locator('.error, .table-error, .chart-error');
     await expect(errorStates, `page ${path} rendered an error state`).toHaveCount(0);
   });

@@ -63,3 +63,7 @@ per-component failure isolation. First run needs a Chromium download
 ```
 cd web && npm run test:e2e
 ```
+
+If a backend is already listening on port 3000, the suite reuses it and skips
+its own fixture regeneration and startup, so stop any old `cargo run -p api`
+first to test the current code.
