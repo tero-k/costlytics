@@ -52,3 +52,14 @@ The frontend's Vitest suite covers the pure/shared modules in `web/src/shared/*`
 ```
 cd web && npm test
 ```
+
+The Playwright end-to-end suite (`web/e2e/`) runs against the real app: it
+regenerates the fixtures, starts the backend and the Vite dev server itself
+(reusing them if already running), and covers page smoke checks, source /
+entity / tag picker switching, comparison-table sort / Top-N / CSV export, and
+per-component failure isolation. First run needs a Chromium download
+(`npx playwright install chromium`); then:
+
+```
+cd web && npm run test:e2e
+```
