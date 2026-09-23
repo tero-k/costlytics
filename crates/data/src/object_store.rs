@@ -134,6 +134,64 @@ impl ObjectStore for LocalObjectStore {
     }
 }
 
+/// `ObjectStore` backed by DuckDB's own filesystem layer (`glob()` and
+/// `read_blob()`), so S3 listing/reading uses exactly the same httpfs
+/// extension and `s3_secret` as the queries themselves — no AWS SDK. For an
+/// `s3://` source, call `duckdb_pool::init_connection` on the pool first.
+pub struct DuckDbObjectStore {
+    pool: crate::duckdb_pool::DbPool,
+}
+
+impl DuckDbObjectStore {
+    pub fn new(pool: crate::duckdb_pool::DbPool) -> Self {
+        Self { pool }
+    }
+
+    fn glob(&self, pattern: &str) -> Result<Vec<String>, ObjectStoreError> {
+        let conn = self.pool.get().map_err(|e| ObjectStoreError::Query(e.to_string()))?;
+        let sql = format!("SELECT file FROM glob('{}') ORDER BY file", pattern.replace('\'', "''"));
+        let mut stmt = conn.prepare(&sql).map_err(|e| ObjectStoreError::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| ObjectStoreError::Query(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ObjectStoreError::Query(e.to_string()))
+    }
+}
+
+/// Extract `YYYY-MM` from the `BILLING_PERIOD=YYYY-MM` path segment of `path`.
+fn billing_period_segment(path: &str) -> Option<String> {
+    path.split(['/', '\\'])
+        .find_map(|seg| seg.strip_prefix("BILLING_PERIOD="))
+        .filter(|ym| YearMonth::parse(ym).is_some())
+        .map(str::to_string)
+}
+
+impl ObjectStore for DuckDbObjectStore {
+    fn list_billing_periods(&self, base_uri: &str) -> Result<Vec<String>, ObjectStoreError> {
+        let pattern = format!("{}/BILLING_PERIOD=*/*", base_uri.trim_end_matches('/'));
+        let mut periods: Vec<String> = self
+            .glob(&pattern)?
+            .iter()
+            .filter_map(|f| billing_period_segment(f))
+            .collect();
+        periods.sort();
+        periods.dedup();
+        Ok(periods)
+    }
+
+    fn read_file(&self, uri: &str) -> Result<Vec<u8>, ObjectStoreError> {
+        let conn = self.pool.get().map_err(|e| ObjectStoreError::Query(e.to_string()))?;
+        let sql = format!("SELECT content FROM read_blob('{}')", uri.replace('\'', "''"));
+        conn.query_row(&sql, [], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|e| ObjectStoreError::Query(e.to_string()))
+    }
+
+    fn list_files(&self, dir_uri: &str, extension: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.glob(&format!("{}/*.{}", dir_uri.trim_end_matches('/'), extension))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +308,29 @@ mod tests {
     #[test]
     fn local_store_list_files_missing_dir_is_empty() {
         assert!(LocalObjectStore.list_files("/nonexistent/dir", "parquet").unwrap().is_empty());
+    }
+
+    #[test]
+    fn duckdb_store_lists_periods_reads_and_lists_files() {
+        let dir = TempDir::new().unwrap();
+        let pd = dir.path().join("BILLING_PERIOD=2026-08");
+        fs::create_dir(&pd).unwrap();
+        fs::write(pd.join("Manifest.json"), b"{\"dataFiles\":[]}").unwrap();
+        fs::write(pd.join("part-1.parquet"), b"x").unwrap();
+        fs::create_dir(dir.path().join("BILLING_PERIOD=bogus")).unwrap();
+        fs::write(dir.path().join("BILLING_PERIOD=bogus").join("f.parquet"), b"x").unwrap();
+
+        let base = dir.path().to_str().unwrap().replace('\\', "/");
+        let store = DuckDbObjectStore::new(crate::duckdb_pool::build_pool().unwrap());
+
+        assert_eq!(store.list_billing_periods(&base).unwrap(), vec!["2026-08"]);
+        assert_eq!(
+            store.read_file(&format!("{base}/BILLING_PERIOD=2026-08/Manifest.json")).unwrap(),
+            b"{\"dataFiles\":[]}"
+        );
+        let files = store.list_files(&format!("{base}/BILLING_PERIOD=2026-08"), "parquet").unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("part-1.parquet"));
+        assert!(store.read_file(&format!("{base}/missing.json")).is_err());
     }
 }
