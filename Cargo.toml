@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/data",
     "crates/api",
+    "crates/service",
 ]
 
 [workspace.dependencies]
