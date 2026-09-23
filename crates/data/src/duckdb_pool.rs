@@ -15,47 +15,76 @@ pub enum DbError {
     Pool(#[from] r2d2::Error),
 }
 
-/// Initialize a DuckDB connection for a given data source.
-///
-/// - For local (non-S3) sources: no extensions are loaded (fully offline).
-/// - For S3 sources: loads `httpfs` + `aws`, then creates a credential-chain secret.
-///
-/// `aws_region` and `aws_profile` are optional overrides for the secret; both default
-/// to the credential-chain discovery behaviour when omitted.
-pub fn init_connection(
-    conn: &Connection,
-    is_s3: bool,
-    aws_region: Option<&str>,
-    aws_profile: Option<&str>,
-) -> Result<(), duckdb::Error> {
-    if is_s3 {
-        conn.execute_batch("INSTALL httpfs; LOAD httpfs; INSTALL aws; LOAD aws;")?;
-        let secret_sql = build_secret_sql(aws_region, aws_profile);
-        conn.execute_batch(&secret_sql)?;
+/// Credentials DuckDB uses to read an `s3://` source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3Auth {
+    /// AWS credential chain (env, `~/.aws` profiles/SSO, instance role).
+    CredentialChain {
+        profile: Option<String>,
+        region: Option<String>,
+    },
+    /// Static access key id + secret.
+    AccessKey {
+        key_id: String,
+        secret: String,
+        region: Option<String>,
+    },
+}
+
+/// Quote `s` as a DuckDB string literal (`'` doubled).
+fn sql_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn non_blank(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Prepare `conn` (and, since every pooled connection shares one in-memory
+/// database, the whole pool) to read S3: loads `httpfs` (plus `aws` for the
+/// credential chain) and creates the `s3_secret`. The extensions are
+/// downloaded on first use and cached under `~/.duckdb/extensions`.
+pub fn init_connection(conn: &Connection, auth: &S3Auth) -> Result<(), duckdb::Error> {
+    conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
+    if matches!(auth, S3Auth::CredentialChain { .. }) {
+        conn.execute_batch("INSTALL aws; LOAD aws;")?;
+    }
+    conn.execute_batch(&build_secret_sql(auth))?;
+    // Best effort: cuts repeated HEAD requests when the same files are
+    // queried again. Not fatal if a future DuckDB drops the setting.
+    if let Err(e) = conn.execute_batch("SET enable_http_metadata_cache = true;") {
+        tracing::debug!(error = %e, "enable_http_metadata_cache not supported");
     }
     Ok(())
 }
 
-/// Build the `CREATE OR REPLACE SECRET` SQL for a credential-chain S3 secret.
-fn build_secret_sql(region: Option<&str>, profile: Option<&str>) -> String {
-    let mut parts = vec![
-        "CREATE OR REPLACE SECRET s3_secret (".to_string(),
-        "    TYPE S3,".to_string(),
-        "    PROVIDER credential_chain".to_string(),
-    ];
-    if let Some(r) = region {
-        parts.push(format!("    , REGION '{}'", r));
+/// Build the `CREATE OR REPLACE SECRET` statement for `auth`. Every value is
+/// escaped with [`sql_str`].
+pub fn build_secret_sql(auth: &S3Auth) -> String {
+    let mut parts = vec!["TYPE S3".to_string()];
+    let region = match auth {
+        S3Auth::CredentialChain { profile, region } => {
+            parts.push("PROVIDER credential_chain".to_string());
+            if let Some(p) = non_blank(profile) {
+                parts.push(format!("PROFILE {}", sql_str(p)));
+            }
+            region
+        }
+        S3Auth::AccessKey { key_id, secret, region } => {
+            parts.push(format!("KEY_ID {}", sql_str(key_id)));
+            parts.push(format!("SECRET {}", sql_str(secret)));
+            region
+        }
+    };
+    if let Some(r) = non_blank(region) {
+        parts.push(format!("REGION {}", sql_str(r)));
     }
-    if let Some(p) = profile {
-        parts.push(format!("    , PROFILE '{}'", p));
-    }
-    parts.push(");".to_string());
-    parts.join("\n")
+    format!("CREATE OR REPLACE SECRET s3_secret ({});", parts.join(", "))
 }
 
 /// Build an in-memory DuckDB pool with 2 connections.
 ///
-/// For S3 sources, call `init_connection` on the first connection obtained from
+/// For S3 sources, call `init_connection(&conn, &auth)` on the first connection obtained from
 /// the pool immediately after building — because all pool connections share the
 /// same underlying in-memory DuckDB instance, the initialisation applies to all.
 pub fn build_pool() -> Result<DbPool, DbError> {
@@ -88,11 +117,18 @@ pub fn build_parquet_list(files: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use duckdb::Connection;
+
+    fn chain(profile: Option<&str>, region: Option<&str>) -> S3Auth {
+        S3Auth::CredentialChain {
+            profile: profile.map(str::to_string),
+            region: region.map(str::to_string),
+        }
+    }
 
     #[test]
-    fn test_build_secret_sql_no_options() {
-        let sql = build_secret_sql(None, None);
+    fn secret_sql_credential_chain_minimal() {
+        let sql = build_secret_sql(&chain(None, None));
+        assert!(sql.starts_with("CREATE OR REPLACE SECRET s3_secret ("));
         assert!(sql.contains("TYPE S3"));
         assert!(sql.contains("PROVIDER credential_chain"));
         assert!(!sql.contains("REGION"));
@@ -100,31 +136,41 @@ mod tests {
     }
 
     #[test]
-    fn test_build_secret_sql_with_region() {
-        let sql = build_secret_sql(Some("eu-west-1"), None);
-        assert!(sql.contains("REGION 'eu-west-1'"));
-        assert!(!sql.contains("PROFILE"));
-    }
-
-    #[test]
-    fn test_build_secret_sql_with_profile() {
-        let sql = build_secret_sql(None, Some("my-profile"));
-        assert!(!sql.contains("REGION"));
-        assert!(sql.contains("PROFILE 'my-profile'"));
-    }
-
-    #[test]
-    fn test_build_secret_sql_with_both() {
-        let sql = build_secret_sql(Some("us-east-1"), Some("prod"));
-        assert!(sql.contains("REGION 'us-east-1'"));
+    fn secret_sql_credential_chain_with_profile_and_region() {
+        let sql = build_secret_sql(&chain(Some("prod"), Some("us-east-1")));
         assert!(sql.contains("PROFILE 'prod'"));
+        assert!(sql.contains("REGION 'us-east-1'"));
     }
 
     #[test]
-    fn test_init_connection_local_no_error() {
-        // Local (non-S3) init must not fail — no extensions loaded.
-        let conn = Connection::open_in_memory().unwrap();
-        init_connection(&conn, false, None, None).unwrap();
+    fn secret_sql_blank_profile_is_omitted() {
+        let sql = build_secret_sql(&chain(Some(""), Some("")));
+        assert!(!sql.contains("PROFILE"));
+        assert!(!sql.contains("REGION"));
+    }
+
+    #[test]
+    fn secret_sql_access_key() {
+        let sql = build_secret_sql(&S3Auth::AccessKey {
+            key_id: "AKIAEXAMPLE".into(),
+            secret: "s3cr3t".into(),
+            region: Some("eu-north-1".into()),
+        });
+        assert!(sql.contains("KEY_ID 'AKIAEXAMPLE'"));
+        assert!(sql.contains("SECRET 's3cr3t'"));
+        assert!(sql.contains("REGION 'eu-north-1'"));
+        assert!(!sql.contains("credential_chain"));
+    }
+
+    #[test]
+    fn secret_sql_escapes_single_quotes() {
+        let sql = build_secret_sql(&S3Auth::AccessKey {
+            key_id: "a'b".into(),
+            secret: "x'); DROP TABLE t; --".into(),
+            region: None,
+        });
+        assert!(sql.contains("KEY_ID 'a''b'"));
+        assert!(sql.contains("SECRET 'x''); DROP TABLE t; --'"));
     }
 
     #[test]
