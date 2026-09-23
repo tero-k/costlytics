@@ -50,21 +50,47 @@
  * this is a no-worse-than-before degradation rather than a hard failure.
  */
 
-import { getSources, setActiveSourceId } from '../api.ts';
+import { getSources, setActiveSourceId, type SourcesResponse } from '../api.ts';
 import { createDimensionPicker } from './dimensionPicker.ts';
 
+const PENDING_POLL_MS = 500;
+/** ~2 minutes: a slow S3 source must not block the page forever. */
+const PENDING_POLL_LIMIT = 240;
+
+/** Re-fetches while any source is still registering (desktop startup runs registration in the background). */
+async function getSettledSources(): Promise<SourcesResponse> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await getSources();
+    if (!res.sources.some((s) => s.state === 'pending') || attempt >= PENDING_POLL_LIMIT) return res;
+    await new Promise((resolve) => setTimeout(resolve, PENDING_POLL_MS));
+  }
+}
+
+/**
+ * Populates the picker, waiting out any `pending` sources first (via
+ * `getSettledSources`, polled every `PENDING_POLL_MS` up to
+ * `PENDING_POLL_LIMIT` attempts) so a source still registering on desktop
+ * startup doesn't get treated as permanently unregistered.
+ *
+ * Resolves with the list of registered source ids once loaded, or `null` if
+ * `getSources()` itself failed (backend down) — callers use this to tell
+ * "loaded fine, zero sources registered" (empty array) apart from "couldn't
+ * even load" (`null`), which call for different UI treatment.
+ */
 export async function initSourcePicker(
   onSourceChange?: (sourceId: string | null) => void,
-): Promise<void> {
+): Promise<string[] | null> {
   const picker = createDimensionPicker({ paramName: 'source', elementId: 'source-picker' });
 
   let ids: string[] = [];
+  let loaded = false;
   try {
-    const { sources, default_source_id } = await getSources();
+    const { sources, default_source_id } = await getSettledSources();
     ids = sources
       .filter((s) => s.state === 'registered')
       .map((s) => s.id)
       .sort((a, b) => a.localeCompare(b));
+    loaded = true;
 
     if (!picker.getUrlParam() && default_source_id && ids.includes(default_source_id)) {
       picker.updateUrlParam(default_source_id);
@@ -98,4 +124,6 @@ export async function initSourcePicker(
     setActiveSourceId(value);
     onSourceChange?.(value);
   });
+
+  return loaded ? ids : null;
 }

@@ -53,10 +53,17 @@ export default defineConfig({
   ],
   webServer: [
     {
-      // Repo-root-relative: regenerate fixtures, then serve the API.
+      // Repo-root-relative: regenerate fixtures, then serve the API against
+      // a SCRATCH COPY of the example config (`target/e2e-settings.toml`).
+      // The Settings e2e spec saves/deletes sources through the real
+      // backend, which persists those mutations back to whatever file
+      // `COSTLYTICS_CONFIG` points at — running against the checked-in
+      // `config/example.toml` directly would let the suite modify (and
+      // dirty git's view of) that file.
       command:
-        'cargo run -p data --bin generate-fixtures && cargo run -p api',
+        'cargo run -p data --bin generate-fixtures && node -e "require(\'fs\').copyFileSync(\'config/example.toml\',\'target/e2e-settings.toml\')" && cargo run -p api',
       cwd: '..',
+      env: { COSTLYTICS_CONFIG: 'target/e2e-settings.toml' },
       url: 'http://127.0.0.1:3000/api/v1/sources',
       // First-time debug build + fixture generation can be slow; generous
       // timeout so a cold `cargo` cache doesn't spuriously fail the suite.

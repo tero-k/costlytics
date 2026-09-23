@@ -17,7 +17,7 @@ const PAGES: Array<{ path: string; activeHref: string; title: string }> = [
   { path: '/service-detail.html', activeHref: '/service-detail.html', title: 'Service Detail' },
   { path: '/account-detail.html', activeHref: '/account-detail.html', title: 'Account Detail' },
   { path: '/cost-changes.html', activeHref: '/cost-changes.html', title: 'Cost Changes' },
-  { path: '/data-sources.html', activeHref: '/data-sources.html', title: 'Data Sources' },
+  { path: '/settings.html', activeHref: '/settings.html', title: 'Settings' },
   { path: '/tags.html', activeHref: '/tags.html', title: 'Tags' },
 ];
 

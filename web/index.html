@@ -15,8 +15,8 @@
           <a href="/service-detail.html">Service Detail</a>
           <a href="/account-detail.html">Account Detail</a>
           <a href="/cost-changes.html">Cost Changes</a>
-          <a href="/data-sources.html">Data Sources</a>
           <a href="/tags.html">Tags</a>
+          <a href="/settings.html">Settings</a>
         </nav>
         <div class="controls">
           <label class="control">
@@ -53,6 +53,11 @@
         <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
       </div>
       <main>
+        <section class="empty-state" id="no-sources" hidden>
+          <h2>No data sources yet</h2>
+          <p>Add an S3 bucket or a local folder with FOCUS / CUR exports to start exploring costs.</p>
+          <a class="button-primary" href="/settings.html">Open Settings</a>
+        </section>
         <div id="overview"></div>
         <section class="chart-section">
           <div class="chart-header">

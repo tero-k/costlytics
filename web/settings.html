@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Costlytics — Settings</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <h1>Costlytics</h1>
+        <nav class="app-nav">
+          <a href="/">Overview</a>
+          <a href="/explorer.html">Cost Explorer</a>
+          <a href="/service-detail.html">Service Detail</a>
+          <a href="/account-detail.html">Account Detail</a>
+          <a href="/cost-changes.html">Cost Changes</a>
+          <a href="/tags.html">Tags</a>
+          <a href="/settings.html" class="active">Settings</a>
+        </nav>
+      </header>
+      <div class="status-bar" id="status-bar">
+        <span class="status-item" id="status-source-count"></span>
+        <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
+      </div>
+      <main>
+        <section class="chart-section">
+          <div class="chart-header">
+            <h2>Data sources</h2>
+            <button type="button" class="button-primary" id="add-source">Add source</button>
+          </div>
+          <div id="sources-table"></div>
+        </section>
+
+        <section class="chart-section" id="source-form-section" hidden>
+          <div class="chart-header"><h2 id="source-form-title">Add source</h2></div>
+          <form id="source-form" class="settings-form" novalidate>
+            <label class="control"><span>Name</span><input id="f-name" required /></label>
+            <label class="control"><span>ID</span><input id="f-id" placeholder="auto from name" /></label>
+            <label class="control"><span>Location type</span>
+              <select id="f-kind"><option value="s3">S3 bucket</option><option value="local">Local folder</option></select>
+            </label>
+            <label class="control wide"><span id="f-location-label">S3 URI</span>
+              <span class="input-row">
+                <input id="f-location" placeholder="s3://my-bucket/exports/my-export/data" />
+                <button type="button" id="f-browse" hidden>Browse&hellip;</button>
+              </span>
+            </label>
+            <label class="control"><span>Format</span>
+              <select id="f-format">
+                <option value="auto">Auto-detect</option><option value="focus12">FOCUS 1.2</option>
+                <option value="focus10">FOCUS 1.0</option><option value="cur2">CUR 2.0</option>
+              </select>
+            </label>
+            <fieldset class="s3-only">
+              <label class="control"><span>Region</span><input id="f-region" placeholder="us-east-1" /></label>
+              <label class="control"><span>Authentication</span>
+                <select id="f-auth">
+                  <option value="credential_chain">AWS profile / credential chain</option>
+                  <option value="access_key">Access key</option>
+                </select>
+              </label>
+              <label class="control chain-only"><span>AWS profile</span><input id="f-profile" placeholder="default chain" /></label>
+              <label class="control key-only"><span>Access key ID</span><input id="f-key-id" autocomplete="off" /></label>
+              <label class="control key-only"><span>Secret access key</span><input id="f-secret" type="password" autocomplete="off" /></label>
+            </fieldset>
+            <p class="form-hint">
+              Point at the folder containing <code>BILLING_PERIOD=YYYY-MM</code> directories. For AWS Data Exports use
+              <code>&hellip;/&lt;export-name&gt;/data</code>. Data is read in place; nothing is copied locally.
+            </p>
+            <div class="form-actions">
+              <button type="button" id="f-test">Test connection</button>
+              <button type="submit" class="button-primary" id="f-save">Save</button>
+              <button type="button" id="f-cancel">Cancel</button>
+            </div>
+            <div id="source-test-result" class="form-result" role="status"></div>
+          </form>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/settingsMain.ts"></script>
+  </body>
+</html>

@@ -23,18 +23,18 @@ export default defineConfig({
       // Explorer (`explorer.html`), the Service Detail drilldown
       // (`service-detail.html`), the Account Detail drilldown
       // (`account-detail.html`), the Cost Changes page
-      // (`cost-changes.html`), the Data Sources diagnostics page
-      // (`data-sources.html`, Session 14 Task 4), and the Tags drilldown
-      // page (`tags.html`, Session 15 Task 2), sharing the same shared/
-      // modules and stylesheet. Vite's default single-entry build only
-      // picks up `index.html`, so all seven must be listed explicitly here.
+      // (`cost-changes.html`), the Tags drilldown page (`tags.html`,
+      // Session 15 Task 2), and the Settings page (`settings.html`), which
+      // replaced the Data Sources page, sharing the same shared/ modules
+      // and stylesheet. Vite's default single-entry build only picks up
+      // `index.html`, so all seven must be listed explicitly here.
       input: {
         index: resolve(rootDir, 'index.html'),
         explorer: resolve(rootDir, 'explorer.html'),
         serviceDetail: resolve(rootDir, 'service-detail.html'),
         accountDetail: resolve(rootDir, 'account-detail.html'),
         costChanges: resolve(rootDir, 'cost-changes.html'),
-        dataSources: resolve(rootDir, 'data-sources.html'),
+        settings: resolve(rootDir, 'settings.html'),
         tags: resolve(rootDir, 'tags.html'),
       },
     },

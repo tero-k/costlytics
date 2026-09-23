@@ -261,7 +261,7 @@ main {
 }
 
 #explorer-table,
-#data-sources-table {
+#sources-table {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
@@ -421,4 +421,77 @@ main {
 .movers-sub {
   font-size: 0.75rem;
   color: var(--color-text-muted);
+}
+
+.button-primary,
+.settings-form button,
+.row-actions button,
+#add-source {
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.button-primary {
+  background: var(--color-accent, #2563eb);
+  border-color: transparent;
+  color: #fff;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.row-actions button.danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.settings-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--spacing);
+  align-items: end;
+}
+
+.settings-form fieldset {
+  display: contents;
+}
+
+.settings-form .wide,
+.settings-form .form-hint,
+.settings-form .form-actions,
+.settings-form .form-result {
+  grid-column: 1 / -1;
+}
+
+.settings-form .input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.settings-form .input-row input {
+  flex: 1;
+}
+
+.form-hint {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.empty-state {
+  text-align: center;
+  padding: calc(var(--spacing) * 3);
+}
+
+[hidden] {
+  display: none !important;
 }
