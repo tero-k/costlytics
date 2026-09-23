@@ -47,21 +47,28 @@ pub fn partitions_for_range(start: NaiveDate, end_exclusive: NaiveDate) -> Vec<Y
     result
 }
 
-/// Discover all manifest partitions covering the given date range.
+/// Discover all partitions covering the given date range.
 ///
-/// For each billing period that overlaps `[start, end_exclusive)`, this function
-/// looks for a `Manifest.json` file at `{base_uri}/BILLING_PERIOD={YYYY-MM}/Manifest.json`.
-/// Periods where no manifest is found are skipped with a `tracing::warn`.
+/// Lists the `BILLING_PERIOD=YYYY-MM` directories under `base_uri` once, keeps
+/// those overlapping `[start, end_exclusive)`, and for each reads
+/// `{base_uri}/BILLING_PERIOD={YYYY-MM}/Manifest.json`. If a period has no
+/// manifest (AWS Data Exports keep manifests under a separate `metadata/`
+/// prefix, so a `data/` folder has none), the period directory's `*.parquet`
+/// files are used directly. Periods with neither are skipped with a warning.
 pub fn discover_partitions(
     store: &dyn ObjectStore,
     base_uri: &str,
     start: NaiveDate,
     end_exclusive: NaiveDate,
 ) -> Result<Vec<DatasetPartition>, DiscoveryError> {
-    let periods = partitions_for_range(start, end_exclusive);
+    let wanted = partitions_for_range(start, end_exclusive);
     let mut partitions = Vec::new();
 
-    for period in periods {
+    for ym in store.list_billing_periods(base_uri)? {
+        let Some(period) = YearMonth::parse(&ym) else { continue };
+        if !wanted.contains(&period) {
+            continue;
+        }
         let partition_dir = format!(
             "{}/BILLING_PERIOD={}",
             base_uri.trim_end_matches('/'),
@@ -84,11 +91,21 @@ pub fn discover_partitions(
                 }
             }
             Err(_) => {
-                tracing::warn!(
-                    period = %period,
-                    manifest_uri = %manifest_uri,
-                    "No Manifest.json found for billing period, skipping"
-                );
+                let files = store.list_files(&partition_dir, "parquet")?;
+                if files.is_empty() {
+                    tracing::warn!(
+                        period = %period,
+                        partition_dir = %partition_dir,
+                        "No Manifest.json or Parquet files for billing period, skipping"
+                    );
+                    continue;
+                }
+                partitions.push(DatasetPartition {
+                    billing_period: period,
+                    manifest_uri: String::new(),
+                    files,
+                    updated_at: chrono::Utc::now(),
+                });
             }
         }
     }
@@ -264,5 +281,40 @@ mod tests {
         assert!(bps.contains(&YearMonth::new(2026, 7)));
         assert!(bps.contains(&YearMonth::new(2026, 8)));
         assert!(bps.contains(&YearMonth::new(2026, 9)));
+    }
+
+    #[test]
+    fn discover_partitions_falls_back_to_parquet_files_without_manifest() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().to_str().unwrap().to_string();
+        let pd = dir.path().join("BILLING_PERIOD=2026-08");
+        fs::create_dir(&pd).unwrap();
+        fs::write(pd.join("export-00001.snappy.parquet"), b"x").unwrap();
+        fs::write(pd.join("export-00002.snappy.parquet"), b"x").unwrap();
+
+        let start = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        let partitions = discover_partitions(&LocalObjectStore, &base, start, end).unwrap();
+
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].files.len(), 2);
+        assert!(partitions[0].files[0].ends_with("export-00001.snappy.parquet"));
+        assert_eq!(partitions[0].manifest_uri, "");
+    }
+
+    #[test]
+    fn discover_partitions_ignores_listed_periods_outside_range() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().to_str().unwrap().to_string();
+        for ym in ["2026-06", "2026-08"] {
+            let pd = dir.path().join(format!("BILLING_PERIOD={ym}"));
+            fs::create_dir(&pd).unwrap();
+            fs::write(pd.join("Manifest.json"), make_manifest_json(&["data.parquet"])).unwrap();
+        }
+        let start = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        let partitions = discover_partitions(&LocalObjectStore, &base, start, end).unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].billing_period, YearMonth::new(2026, 8));
     }
 }

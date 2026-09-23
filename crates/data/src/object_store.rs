@@ -6,6 +6,8 @@ pub enum ObjectStoreError {
     Io(#[from] std::io::Error),
     #[error("Invalid path: {0}")]
     InvalidPath(String),
+    #[error("Query error: {0}")]
+    Query(String),
 }
 
 /// A year+month pair used to identify billing period partitions.
@@ -68,6 +70,10 @@ pub trait ObjectStore: Send + Sync {
 
     /// Read the bytes of a file (e.g. Manifest.json).
     fn read_file(&self, uri: &str) -> Result<Vec<u8>, ObjectStoreError>;
+
+    /// List files directly under `dir_uri` whose name ends in `.{extension}`,
+    /// as full URIs/paths, sorted. A missing directory yields an empty list.
+    fn list_files(&self, dir_uri: &str, extension: &str) -> Result<Vec<String>, ObjectStoreError>;
 }
 
 /// Local filesystem implementation of `ObjectStore`.
@@ -103,6 +109,28 @@ impl ObjectStore for LocalObjectStore {
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>, ObjectStoreError> {
         Ok(std::fs::read(path)?)
+    }
+
+    fn list_files(&self, dir_uri: &str, extension: &str) -> Result<Vec<String>, ObjectStoreError> {
+        let dir = std::path::Path::new(dir_uri);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let suffix = format!(".{extension}");
+        let base = dir_uri.trim_end_matches('/').trim_end_matches('\\');
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(&suffix) {
+                files.push(format!("{base}/{name}"));
+            }
+        }
+        files.sort();
+        Ok(files)
     }
 }
 
@@ -206,5 +234,21 @@ mod tests {
         assert_eq!(end.year(), 2027);
         assert_eq!(end.month(), 1);
         assert_eq!(end.day(), 1);
+    }
+
+    #[test]
+    fn local_store_lists_files_by_extension() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("b.parquet"), b"x").unwrap();
+        fs::write(dir.path().join("a.parquet"), b"x").unwrap();
+        fs::write(dir.path().join("Manifest.json"), b"{}").unwrap();
+        let base = dir.path().to_str().unwrap();
+        let files = LocalObjectStore.list_files(base, "parquet").unwrap();
+        assert_eq!(files, vec![format!("{base}/a.parquet"), format!("{base}/b.parquet")]);
+    }
+
+    #[test]
+    fn local_store_list_files_missing_dir_is_empty() {
+        assert!(LocalObjectStore.list_files("/nonexistent/dir", "parquet").unwrap().is_empty());
     }
 }
