@@ -342,14 +342,16 @@ async fn http_filter_values_and_compare_over_real_http() {
 /// Two sources are configured, deliberately in this order:
 /// 1. `local-good`, a local FOCUS 1.2 fixture directory that registers
 ///    successfully (`Registered`).
-/// 2. `s3-broken`, an `s3://`-prefixed source. `build_app` skips S3 sources
-///    unconditionally this session (`DataSource::is_s3` short-circuits
-///    before any discovery/detection I/O runs), so this is a deterministic,
-///    filesystem-independent way to exercise the `Skipped` path over real
-///    HTTP — unlike an empty/nonexistent local directory, which `build_app`
-///    treats as a valid, zero-file `Registered` source (see `lib.rs`'s
-///    `build_app` doc comment on that judgment call), so it would NOT prove
-///    the `Skipped` shape here.
+/// 2. `broken`, a local directory whose only "Parquet" file is garbage, so
+///    schema detection fails deterministically (`Skipped`). This used to be
+///    an `s3://`-prefixed source (S3 discovery was unconditionally skipped
+///    in the old `crates/api`-only world), but `service::register_source`
+///    now really tries to connect to S3, which needs network and isn't
+///    deterministic/offline-safe for a test — so the deterministic-failure
+///    case is exercised locally instead. Note an empty/nonexistent local
+///    directory would NOT prove the `Skipped` shape here — that registers as
+///    a valid, zero-file `Registered` source instead (see
+///    `service::register::register_source`'s doc comment).
 ///
 /// `local-good` is listed first so this test proves SOMETHING about
 /// `default_source_id`'s exact value, but note this ordering does NOT by
@@ -367,6 +369,14 @@ async fn http_sources_list_reflects_configured_sources() {
     let dir = tempfile::tempdir().unwrap();
     generate_focus12_fixture(dir.path()).unwrap();
 
+    // A local source whose only "Parquet" file is garbage → schema detection
+    // fails deterministically, offline → Skipped.
+    let broken_dir = tempfile::tempdir().unwrap();
+    let pd = broken_dir.path().join("BILLING_PERIOD=2026-08");
+    std::fs::create_dir(&pd).unwrap();
+    std::fs::write(pd.join("Manifest.json"), br#"{"dataFiles":["data.parquet"]}"#).unwrap();
+    std::fs::write(pd.join("data.parquet"), b"not parquet").unwrap();
+
     let config = AppConfig {
         server: ServerConfig::default(),
         sources: vec![
@@ -381,13 +391,10 @@ async fn http_sources_list_reflects_configured_sources() {
                 ..Default::default()
             },
             DataSource {
-                id: "s3-broken".into(),
-                name: "S3 Broken Source".into(),
-                s3_uri: "s3://some-bucket/prefix/".into(),
+                id: "broken".into(),
+                name: "Broken Source".into(),
+                s3_uri: broken_dir.path().to_str().unwrap().to_string(),
                 source_type: SourceType::Auto,
-                aws_region: None,
-                aws_profile: None,
-                role_arn: None,
                 ..Default::default()
             },
         ],
@@ -425,14 +432,54 @@ async fn http_sources_list_reflects_configured_sources() {
     assert!(good.get("reason").is_none());
 
     let broken = &sources[1];
-    assert_eq!(broken["id"], "s3-broken");
-    assert_eq!(broken["name"], "S3 Broken Source");
+    assert_eq!(broken["id"], "broken");
+    assert_eq!(broken["name"], "Broken Source");
     assert_eq!(broken["configured_type"], "auto");
     assert_eq!(broken["state"], "skipped");
-    assert_eq!(
-        broken["reason"],
-        "S3 source; S3 discovery not implemented this session"
+    assert!(
+        broken["reason"].as_str().unwrap().starts_with("schema detection failed"),
+        "{}", broken["reason"]
     );
     assert!(broken.get("detected_format").is_none());
     assert!(broken.get("file_count").is_none());
+}
+
+/// Settings over HTTP: add a local source → it registers → list shows it →
+/// delete → gone. Runs against the same `service` code the desktop app uses.
+#[tokio::test]
+async fn http_settings_add_and_delete_source() {
+    let dir = tempfile::tempdir().unwrap();
+    generate_focus12_fixture(dir.path()).unwrap();
+    let app = build_app(AppConfig::default()).expect("build_app");
+
+    let post = |uri: &str, body: serde_json::Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+    let source = serde_json::json!({
+        "id": "added", "name": "Added", "s3_uri": dir.path().to_str().unwrap(),
+        "source_type": "auto", "auth": { "type": "credential_chain" }
+    });
+
+    let resp = app.clone().oneshot(post("/api/v1/settings/source-test", serde_json::json!({ "source": source }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(json["detected_format"], "focus12");
+
+    let resp = app.clone().oneshot(post("/api/v1/settings/source-save", serde_json::json!({ "source": source, "is_new": true }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(json["state"], "registered");
+
+    let resp = app.clone().oneshot(post("/api/v1/settings/source-save", serde_json::json!({ "source": source, "is_new": true }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    let resp = app.clone().oneshot(post("/api/v1/settings/source-delete", serde_json::json!({ "id": "added" }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(json["sources"], serde_json::json!([]));
 }

@@ -38,6 +38,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/filter-values/tag-values",
             get(handlers::filter_values_tag_values),
         )
+        .route("/api/v1/settings", get(handlers::settings_get))
+        .route("/api/v1/settings/source-save", post(handlers::settings_source_save))
+        .route("/api/v1/settings/source-delete", post(handlers::settings_source_delete))
+        .route("/api/v1/settings/source-test", post(handlers::settings_source_test))
+        .route("/api/v1/settings/source-reload", post(handlers::settings_source_reload))
         .with_state(state);
 
     // Security headers via tower-http

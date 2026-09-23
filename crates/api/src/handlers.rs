@@ -1,842 +1,112 @@
+//! Axum wrappers over `service` — all validation/query logic lives there.
+
 use axum::{
     extract::{Json, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use data::queries::summary::{CostRepository, QueryError};
-use domain::{
-    cost::{BreakdownRow, CostMetric, TimeSeriesPoint},
-    dimensions::Dimension,
-    filters::{CostFilter, TagFilter, TimeGranularity},
+use serde::Serialize;
+use service::app::{SaveSourceRequest, SourceIdRequest, TestSourceRequest};
+use service::cost::{
+    self, BreakdownRequest, CompareRequest, FilterDimension, FilterValuesQuery, SummaryRequest,
+    TagValuesQuery, TimeseriesRequest,
 };
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use service::{ErrorKind, ServiceError};
 
 use crate::state::AppState;
 
-/// Maximum allowable query date range, in days (~5 years).
-const MAX_DATE_RANGE_DAYS: i64 = 5 * 366;
+fn error_response(err: ServiceError) -> Response {
+    let status = match err.kind {
+        ErrorKind::BadRequest => StatusCode::BAD_REQUEST,
+        ErrorKind::Conflict => StatusCode::CONFLICT,
+        ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(serde_json::json!({ "error": err.message }))).into_response()
+}
 
-/// Maximum number of values allowed in any single predicate list field
-/// (`accounts`/`services`/`regions`/`charge_categories`/`resource_ids`), or
-/// in the total `tags` vec, on any `/cost/*` request. Reuses
-/// `MAX_FILTER_VALUES`'s cardinality/rationale from the `data` crate: the
-/// `filter-values` lookup endpoints can never return more than that many
-/// distinct values, so no legitimate client needs a longer predicate list.
-/// Enforced here, at the request-validation layer, rather than inside
-/// `data::queries::predicate` — that keeps the predicate builder a simple,
-/// policy-free translator and matches how `MAX_DATE_RANGE_DAYS` and
-/// `breakdown`'s `limit` cap are already validated in this file.
-const MAX_PREDICATE_VALUES: usize = 1000;
-
-// ---------------------------------------------------------------------------
-// Health check
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-pub struct HealthResponse {
-    pub status: &'static str,
-    pub version: &'static str,
+/// Runs a blocking service call on the blocking pool and maps the result.
+async fn run<T, F>(f: F) -> Response
+where
+    T: Serialize + Send + 'static,
+    F: FnOnce() -> Result<T, ServiceError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(Ok(value)) => (StatusCode::OK, Json(value)).into_response(),
+        Ok(Err(err)) => error_response(err),
+        Err(join_err) => {
+            tracing::error!(error = %join_err, "handler task panicked");
+            error_response(ServiceError::internal("internal server error"))
+        }
+    }
 }
 
 pub async fn health() -> impl IntoResponse {
-    Json(HealthResponse {
-        status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
-    })
+    Json(cost::health())
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/v1/cost/summary
-// ---------------------------------------------------------------------------
-
-/// Allowable metric strings as sent by clients.
-fn parse_metric(s: &str) -> Option<CostMetric> {
-    match s.to_ascii_lowercase().as_str() {
-        "amortized" => Some(CostMetric::Amortized),
-        "billed" => Some(CostMetric::Billed),
-        "list" => Some(CostMetric::List),
-        "contracted" => Some(CostMetric::Contracted),
-        _ => None,
-    }
+pub async fn cost_summary(State(s): State<AppState>, Json(req): Json<SummaryRequest>) -> Response {
+    run(move || cost::cost_summary(&s.registry, req)).await
 }
 
-/// The six `CostFilter` predicate fields a client may supply on any
-/// `/cost/*` request, flattened directly into each request struct so the
-/// JSON shape stays a single flat object (see the brief's example body).
-/// All fields are optional and default to empty ("no filter on this
-/// dimension"), matching `CostFilter::date_range`'s own defaults.
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
-pub struct FilterFields {
-    #[serde(default)]
-    pub accounts: Vec<String>,
-    #[serde(default)]
-    pub services: Vec<String>,
-    #[serde(default)]
-    pub regions: Vec<String>,
-    #[serde(default)]
-    pub charge_categories: Vec<String>,
-    #[serde(default)]
-    pub resource_ids: Vec<String>,
-    #[serde(default)]
-    pub tags: Vec<TagFilter>,
+pub async fn cost_timeseries(State(s): State<AppState>, Json(req): Json<TimeseriesRequest>) -> Response {
+    run(move || cost::cost_timeseries(&s.registry, req)).await
 }
 
-impl FilterFields {
-    /// Copies these fields onto a `CostFilter`'s corresponding predicate
-    /// fields (`filter.start`/`end`/`metric`/`granularity` are left
-    /// untouched — this only ever sets the predicate fields).
-    fn apply(&self, filter: &mut CostFilter) {
-        filter.accounts = self.accounts.clone();
-        filter.services = self.services.clone();
-        filter.regions = self.regions.clone();
-        filter.charge_categories = self.charge_categories.clone();
-        filter.resource_ids = self.resource_ids.clone();
-        filter.tags = self.tags.clone();
-    }
+pub async fn cost_breakdown(State(s): State<AppState>, Json(req): Json<BreakdownRequest>) -> Response {
+    run(move || cost::cost_breakdown(&s.registry, req)).await
 }
 
-#[derive(Deserialize)]
-pub struct SummaryRequest {
-    pub source_id: Option<String>,
-    pub start: NaiveDate,
-    pub end: NaiveDate,
-    pub metric: Option<String>,
-    #[serde(flatten)]
-    pub filters: FilterFields,
+pub async fn cost_compare(State(s): State<AppState>, Json(req): Json<CompareRequest>) -> Response {
+    run(move || cost::cost_compare(&s.registry, req)).await
 }
 
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
+async fn values(s: AppState, dim: FilterDimension, q: FilterValuesQuery) -> Response {
+    run(move || cost::filter_values(&s.registry, dim, q)).await
 }
 
-fn bad_request(msg: impl Into<String>) -> impl IntoResponse {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse { error: msg.into() }),
-    )
+pub async fn filter_values_services(State(s): State<AppState>, Query(q): Query<FilterValuesQuery>) -> Response {
+    values(s, FilterDimension::Services, q).await
 }
 
-fn internal_error(msg: impl Into<String>) -> impl IntoResponse {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: msg.into() }),
-    )
+pub async fn filter_values_accounts(State(s): State<AppState>, Query(q): Query<FilterValuesQuery>) -> Response {
+    values(s, FilterDimension::Accounts, q).await
 }
 
-fn conflict(msg: impl Into<String>) -> impl IntoResponse {
-    (
-        StatusCode::CONFLICT,
-        Json(ErrorResponse { error: msg.into() }),
-    )
+pub async fn filter_values_regions(State(s): State<AppState>, Query(q): Query<FilterValuesQuery>) -> Response {
+    values(s, FilterDimension::Regions, q).await
 }
 
-/// Outcome of the preamble shared by all three `/cost/*` handlers: a resolved
-/// repository plus the `CostFilter` built from the validated request.
-struct ResolvedRequest {
-    repo: Arc<dyn CostRepository>,
-    filter: CostFilter,
+pub async fn filter_values_tag_keys(State(s): State<AppState>, Query(q): Query<FilterValuesQuery>) -> Response {
+    values(s, FilterDimension::TagKeys, q).await
 }
 
-/// Validates a single `(start, end)` date pair — `start` before `end`, and
-/// the range not exceeding [`MAX_DATE_RANGE_DAYS`] — and converts both bounds
-/// to UTC `DateTime`s at midnight.
-///
-/// Factored out of `resolve_common` so that handlers needing more than one
-/// independent date-range pair (namely `cost_compare`, with its `current` and
-/// `previous` ranges) can validate each pair through this single code path
-/// instead of hand-copying the checks.
-fn validate_date_range(
-    start: NaiveDate,
-    end: NaiveDate,
-) -> Result<(DateTime<Utc>, DateTime<Utc>), Box<Response>> {
-    // Validate: start must be before end
-    if start >= end {
-        return Err(Box::new(bad_request("start must be before end").into_response()));
-    }
-
-    // Validate: date range must not exceed 5 years (~1827 days)
-    let days = (end - start).num_days();
-    if days > MAX_DATE_RANGE_DAYS {
-        return Err(Box::new(
-            bad_request("date range must not exceed 5 years").into_response(),
-        ));
-    }
-
-    // Convert NaiveDate to DateTime<Utc> at midnight UTC
-    let start = Utc.from_utc_datetime(&start.and_hms_opt(0, 0, 0).unwrap());
-    let end = Utc.from_utc_datetime(&end.and_hms_opt(0, 0, 0).unwrap());
-
-    Ok((start, end))
+pub async fn filter_values_tag_values(State(s): State<AppState>, Query(q): Query<TagValuesQuery>) -> Response {
+    run(move || cost::tag_values(&s.registry, q)).await
 }
 
-/// Validates that no single predicate list field, nor the total `tags`
-/// vec, on `fields` exceeds [`MAX_PREDICATE_VALUES`]. `label` identifies
-/// which side of the request `fields` came from (e.g. `""` for the flat
-/// `/cost/summary`-style requests, or `"current."`/`"previous."` for
-/// `compare`'s nested fields) so the 400 body names the offending field
-/// precisely.
-fn validate_filter_fields(fields: &FilterFields, label: &str) -> Result<(), Box<Response>> {
-    let checks: [(&str, usize); 6] = [
-        ("accounts", fields.accounts.len()),
-        ("services", fields.services.len()),
-        ("regions", fields.regions.len()),
-        ("charge_categories", fields.charge_categories.len()),
-        ("resource_ids", fields.resource_ids.len()),
-        ("tags", fields.tags.len()),
-    ];
-    for (name, len) in checks {
-        if len > MAX_PREDICATE_VALUES {
-            return Err(Box::new(
-                bad_request(format!(
-                    "{label}{name} must not contain more than {MAX_PREDICATE_VALUES} values"
-                ))
-                .into_response(),
-            ));
-        }
-    }
-    Ok(())
+pub async fn sources_list(State(s): State<AppState>) -> Response {
+    run(move || Ok(s.sources())).await
 }
 
-/// Parses the optional `metric` request field, defaulting to
-/// [`CostMetric::default`] when absent.
-fn resolve_metric(metric: Option<&str>) -> Result<CostMetric, Box<Response>> {
-    match metric {
-        Some(m) => parse_metric(m)
-            .ok_or_else(|| Box::new(bad_request(format!("unknown metric '{}'", m)).into_response())),
-        None => Ok(CostMetric::default()),
-    }
+pub async fn settings_get(State(s): State<AppState>) -> Response {
+    run(move || Ok(s.settings())).await
 }
 
-/// Resolves `source_id` against `state.repos`, defaulting to the first
-/// configured source when absent.
-fn resolve_source(
-    state: &AppState,
-    source_id: Option<&str>,
-) -> Result<Arc<dyn CostRepository>, Box<Response>> {
-    let source_id = if let Some(id) = source_id {
-        id.to_string()
-    } else {
-        match state.config.sources.first() {
-            Some(src) => src.id.clone(),
-            None => return Err(Box::new(bad_request("no sources configured").into_response())),
-        }
-    };
-
-    match state.repos.get(&source_id) {
-        Some(r) => Ok(r.clone()),
-        None => Err(Box::new(
-            bad_request(format!("unknown source_id '{}'", source_id)).into_response(),
-        )),
-    }
+pub async fn settings_source_save(State(s): State<AppState>, Json(req): Json<SaveSourceRequest>) -> Response {
+    run(move || s.save_source(req)).await
 }
 
-/// Shared request preamble for the `/cost/*` handlers: validates the date
-/// range, parses the metric, resolves `source_id` against `state.repos`
-/// (defaulting to the first configured source), converts the `NaiveDate`
-/// bounds to UTC `DateTime`s, and builds the resulting `CostFilter`.
-///
-/// Request-shape-specific parsing (granularity, group_by, dimension, limit)
-/// stays in each handler — only the genuinely shared logic lives here.
-fn resolve_common(
-    state: &AppState,
-    source_id: Option<&str>,
-    start: NaiveDate,
-    end: NaiveDate,
-    metric: Option<&str>,
-    filters: &FilterFields,
-) -> Result<ResolvedRequest, Box<Response>> {
-    let (start, end) = validate_date_range(start, end)?;
-    let metric = resolve_metric(metric)?;
-    let repo = resolve_source(state, source_id)?;
-    validate_filter_fields(filters, "")?;
-
-    let mut filter = CostFilter::date_range(start, end);
-    filter.metric = metric;
-    filters.apply(&mut filter);
-
-    Ok(ResolvedRequest { repo, filter })
+pub async fn settings_source_delete(State(s): State<AppState>, Json(req): Json<SourceIdRequest>) -> Response {
+    run(move || s.delete_source(req)).await
 }
 
-pub async fn cost_summary(
-    State(state): State<AppState>,
-    Json(body): Json<SummaryRequest>,
-) -> impl IntoResponse {
-    let ResolvedRequest { repo, filter } = match resolve_common(
-        &state,
-        body.source_id.as_deref(),
-        body.start,
-        body.end,
-        body.metric.as_deref(),
-        &body.filters,
-    ) {
-        Ok(resolved) => resolved,
-        Err(resp) => return *resp,
-    };
-
-    // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
-    let result = tokio::task::spawn_blocking(move || repo.summary(&filter)).await;
-
-    match result {
-        Err(join_err) => {
-            tracing::error!(error = %join_err, "cost_summary task panicked");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
-            "multiple currencies present: [{}]; currency filtering is not yet supported",
-            currencies.join(", ")
-        ))
-        .into_response(),
-        Ok(Err(query_err)) => {
-            tracing::error!(error = %query_err, "cost_summary query failed");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Ok(summary)) => (StatusCode::OK, Json(summary)).into_response(),
-    }
+pub async fn settings_source_test(State(s): State<AppState>, Json(req): Json<TestSourceRequest>) -> Response {
+    run(move || s.test_source(req)).await
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/v1/cost/timeseries
-// ---------------------------------------------------------------------------
-
-/// Allowable granularity strings as sent by clients.
-fn parse_granularity(s: &str) -> Option<TimeGranularity> {
-    match s.to_ascii_lowercase().as_str() {
-        "day" => Some(TimeGranularity::Day),
-        "month" => Some(TimeGranularity::Month),
-        "year" => Some(TimeGranularity::Year),
-        _ => None,
-    }
-}
-
-/// Allowable dimension strings as sent by clients. Reuses `Dimension`'s own
-/// `snake_case` `Deserialize` impl rather than duplicating a match arm.
-fn parse_dimension(s: &str) -> Option<Dimension> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
-}
-
-#[derive(Deserialize)]
-pub struct TimeseriesRequest {
-    pub source_id: Option<String>,
-    pub start: NaiveDate,
-    pub end: NaiveDate,
-    pub metric: Option<String>,
-    pub granularity: Option<String>,
-    pub group_by: Option<String>,
-    #[serde(flatten)]
-    pub filters: FilterFields,
-}
-
-#[derive(Serialize)]
-pub struct TimeseriesResponse {
-    pub metric: CostMetric,
-    pub currency: String,
-    pub granularity: TimeGranularity,
-    pub series: Vec<TimeSeriesPoint>,
-}
-
-pub async fn cost_timeseries(
-    State(state): State<AppState>,
-    Json(body): Json<TimeseriesRequest>,
-) -> impl IntoResponse {
-    let ResolvedRequest { repo, mut filter } = match resolve_common(
-        &state,
-        body.source_id.as_deref(),
-        body.start,
-        body.end,
-        body.metric.as_deref(),
-        &body.filters,
-    ) {
-        Ok(resolved) => resolved,
-        Err(resp) => return *resp,
-    };
-    let metric = filter.metric;
-
-    // Parse granularity
-    let granularity = if let Some(ref g) = body.granularity {
-        match parse_granularity(g) {
-            Some(g) => g,
-            None => return bad_request(format!("unknown granularity '{}'", g)).into_response(),
-        }
-    } else {
-        TimeGranularity::default()
-    };
-    filter.granularity = granularity;
-
-    // Parse group_by (optional)
-    let group_by = if let Some(ref d) = body.group_by {
-        match parse_dimension(d) {
-            Some(dim) => Some(dim),
-            None => return bad_request(format!("unknown group_by '{}'", d)).into_response(),
-        }
-    } else {
-        None
-    };
-
-    // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
-    let result = tokio::task::spawn_blocking(move || repo.timeseries(&filter, group_by)).await;
-
-    match result {
-        Err(join_err) => {
-            tracing::error!(error = %join_err, "cost_timeseries task panicked");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
-            "multiple currencies present: [{}]; currency filtering is not yet supported",
-            currencies.join(", ")
-        ))
-        .into_response(),
-        Ok(Err(query_err)) => {
-            tracing::error!(error = %query_err, "cost_timeseries query failed");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Ok(result)) => (
-            StatusCode::OK,
-            Json(TimeseriesResponse {
-                metric,
-                currency: result.currency,
-                granularity,
-                series: result.points,
-            }),
-        )
-            .into_response(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// POST /api/v1/cost/breakdown
-// ---------------------------------------------------------------------------
-
-/// Default and maximum Top-N result size for breakdown queries.
-const DEFAULT_BREAKDOWN_LIMIT: usize = 50;
-const MAX_BREAKDOWN_LIMIT: usize = 10_000;
-
-#[derive(Deserialize)]
-pub struct BreakdownRequest {
-    pub source_id: Option<String>,
-    pub start: NaiveDate,
-    pub end: NaiveDate,
-    pub metric: Option<String>,
-    pub dimension: Option<String>,
-    pub limit: Option<usize>,
-    #[serde(flatten)]
-    pub filters: FilterFields,
-}
-
-#[derive(Serialize)]
-pub struct BreakdownResponse {
-    pub metric: CostMetric,
-    pub currency: String,
-    pub dimension: Dimension,
-    pub rows: Vec<BreakdownRow>,
-}
-
-pub async fn cost_breakdown(
-    State(state): State<AppState>,
-    Json(body): Json<BreakdownRequest>,
-) -> impl IntoResponse {
-    let ResolvedRequest { repo, filter } = match resolve_common(
-        &state,
-        body.source_id.as_deref(),
-        body.start,
-        body.end,
-        body.metric.as_deref(),
-        &body.filters,
-    ) {
-        Ok(resolved) => resolved,
-        Err(resp) => return *resp,
-    };
-    let metric = filter.metric;
-
-    // Parse dimension (required)
-    let dimension = match body.dimension {
-        Some(ref d) => match parse_dimension(d) {
-            Some(dim) => dim,
-            None => return bad_request(format!("unknown dimension '{}'", d)).into_response(),
-        },
-        None => return bad_request("dimension is required").into_response(),
-    };
-
-    // Validate limit
-    let limit = body.limit.unwrap_or(DEFAULT_BREAKDOWN_LIMIT);
-    if limit == 0 {
-        return bad_request("limit must be greater than 0").into_response();
-    }
-    if limit > MAX_BREAKDOWN_LIMIT {
-        return bad_request(format!("limit must not exceed {}", MAX_BREAKDOWN_LIMIT))
-            .into_response();
-    }
-
-    // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
-    let result =
-        tokio::task::spawn_blocking(move || repo.breakdown(&filter, dimension, limit)).await;
-
-    match result {
-        Err(join_err) => {
-            tracing::error!(error = %join_err, "cost_breakdown task panicked");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
-            "multiple currencies present: [{}]; currency filtering is not yet supported",
-            currencies.join(", ")
-        ))
-        .into_response(),
-        Ok(Err(query_err)) => {
-            tracing::error!(error = %query_err, "cost_breakdown query failed");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Ok(result)) => (
-            StatusCode::OK,
-            Json(BreakdownResponse {
-                metric,
-                currency: result.currency,
-                dimension,
-                rows: result.rows,
-            }),
-        )
-            .into_response(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// POST /api/v1/cost/compare
-// ---------------------------------------------------------------------------
-
-/// `current`/`previous` are separate, independently-deserialized
-/// `FilterFields` (rather than a single flat set of predicate fields shared
-/// with the other `/cost/*` requests) *specifically* because the two
-/// periods being compared can legitimately be scoped differently — this is
-/// a deliberate shape asymmetry, not an oversight. See `CompareResponse`'s
-/// `current_filters`/`previous_filters` for how the response makes the
-/// effective filters on each side visible, so an accidentally-omitted
-/// `previous` (which silently defaults to "no filter") is easy to spot
-/// rather than producing a silently-wrong comparison.
-#[derive(Deserialize)]
-pub struct CompareRequest {
-    pub source_id: Option<String>,
-    pub current_start: NaiveDate,
-    pub current_end: NaiveDate,
-    pub previous_start: NaiveDate,
-    pub previous_end: NaiveDate,
-    pub metric: Option<String>,
-    pub dimension: Option<String>,
-    /// Predicate fields for the *current* period only — `compare()` applies
-    /// each period's own filter to its own aggregate, so `current` and
-    /// `previous` are independent and may differ (see `CostRepository::compare`'s
-    /// doc comment). Defaults to no filter (all fields empty) when absent.
-    #[serde(default)]
-    pub current: FilterFields,
-    /// Predicate fields for the *previous* period only. See `current`.
-    #[serde(default)]
-    pub previous: FilterFields,
-}
-
-#[derive(Serialize)]
-pub struct CompareResponse {
-    pub metric: CostMetric,
-    pub currency: String,
-    pub dimension: Option<Dimension>,
-    pub rows: Vec<domain::cost::CompareRow>,
-    /// The predicate fields actually applied to the *current* period,
-    /// echoed back exactly as parsed from the request (including
-    /// `#[serde(default)]`-filled-in empty defaults when the client omitted
-    /// `current` entirely). Makes it immediately visible in the response
-    /// when `current`/`previous` were scoped asymmetrically — including the
-    /// common "forgot to set previous" mistake, which would otherwise
-    /// silently compare a filtered current period against an unfiltered
-    /// previous one.
-    pub current_filters: FilterFields,
-    /// The predicate fields actually applied to the *previous* period. See
-    /// `current_filters`.
-    pub previous_filters: FilterFields,
-}
-
-pub async fn cost_compare(
-    State(state): State<AppState>,
-    Json(body): Json<CompareRequest>,
-) -> impl IntoResponse {
-    // Validate both date-range pairs through the same path `resolve_common`
-    // uses for its single pair — no hand-copied start/end or max-range checks.
-    let (current_start, current_end) =
-        match validate_date_range(body.current_start, body.current_end) {
-            Ok(range) => range,
-            Err(resp) => return *resp,
-        };
-    let (previous_start, previous_end) =
-        match validate_date_range(body.previous_start, body.previous_end) {
-            Ok(range) => range,
-            Err(resp) => return *resp,
-        };
-
-    let metric = match resolve_metric(body.metric.as_deref()) {
-        Ok(m) => m,
-        Err(resp) => return *resp,
-    };
-
-    let repo = match resolve_source(&state, body.source_id.as_deref()) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-
-    if let Err(resp) = validate_filter_fields(&body.current, "current.") {
-        return *resp;
-    }
-    if let Err(resp) = validate_filter_fields(&body.previous, "previous.") {
-        return *resp;
-    }
-
-    // Parse dimension (optional — unlike breakdown, compare without one is a
-    // valid, meaningful single aggregate row)
-    let dimension = match body.dimension {
-        Some(ref d) => match parse_dimension(d) {
-            Some(dim) => Some(dim),
-            None => return bad_request(format!("unknown dimension '{}'", d)).into_response(),
-        },
-        None => None,
-    };
-
-    // Cloned before the filters are consumed below, so the effective
-    // filters can be echoed back on the response (see `CompareResponse`'s
-    // `current_filters`/`previous_filters` doc comment).
-    let current_filters = body.current.clone();
-    let previous_filters = body.previous.clone();
-
-    let mut current_filter = CostFilter::date_range(current_start, current_end);
-    current_filter.metric = metric;
-    body.current.apply(&mut current_filter);
-    let mut previous_filter = CostFilter::date_range(previous_start, previous_end);
-    previous_filter.metric = metric;
-    body.previous.apply(&mut previous_filter);
-
-    // Call repo — this is a blocking DuckDB call; run it on the blocking thread pool
-    let result = tokio::task::spawn_blocking(move || {
-        repo.compare(&current_filter, &previous_filter, dimension)
-    })
-    .await;
-
-    match result {
-        Err(join_err) => {
-            tracing::error!(error = %join_err, "cost_compare task panicked");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
-            "multiple currencies present: [{}]; currency filtering is not yet supported",
-            currencies.join(", ")
-        ))
-        .into_response(),
-        Ok(Err(query_err)) => {
-            tracing::error!(error = %query_err, "cost_compare query failed");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Ok(result)) => (
-            StatusCode::OK,
-            Json(CompareResponse {
-                metric,
-                currency: result.currency,
-                dimension,
-                rows: result.rows,
-                current_filters,
-                previous_filters,
-            }),
-        )
-            .into_response(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/filter-values/{services,accounts,regions,tag-keys,tag-values}
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct FilterValuesQuery {
-    pub source_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct TagValuesQuery {
-    pub source_id: Option<String>,
-    pub key: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct FilterValuesResponse {
-    pub values: Vec<String>,
-}
-
-/// Shared response handling for the filter-value lookup endpoints: runs the
-/// blocking DuckDB call and maps errors consistently with the `/cost/*`
-/// handlers (including the 409 for `MultipleCurrencies`, even though none of
-/// these queries are expected to hit it — keeps the mapping uniform).
-async fn respond_with_values(
-    result: Result<Result<Vec<String>, QueryError>, tokio::task::JoinError>,
-    op: &str,
-) -> Response {
-    match result {
-        Err(join_err) => {
-            tracing::error!(error = %join_err, op, "filter-values task panicked");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Err(QueryError::MultipleCurrencies(currencies))) => conflict(format!(
-            "multiple currencies present: [{}]; currency filtering is not yet supported",
-            currencies.join(", ")
-        ))
-        .into_response(),
-        Ok(Err(query_err)) => {
-            tracing::error!(error = %query_err, op, "filter-values query failed");
-            internal_error("internal server error").into_response()
-        }
-        Ok(Ok(values)) => (StatusCode::OK, Json(FilterValuesResponse { values })).into_response(),
-    }
-}
-
-pub async fn filter_values_services(
-    State(state): State<AppState>,
-    Query(query): Query<FilterValuesQuery>,
-) -> impl IntoResponse {
-    let repo = match resolve_source(&state, query.source_id.as_deref()) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    let result = tokio::task::spawn_blocking(move || repo.distinct_services()).await;
-    respond_with_values(result, "distinct_services").await
-}
-
-pub async fn filter_values_accounts(
-    State(state): State<AppState>,
-    Query(query): Query<FilterValuesQuery>,
-) -> impl IntoResponse {
-    let repo = match resolve_source(&state, query.source_id.as_deref()) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    let result = tokio::task::spawn_blocking(move || repo.distinct_accounts()).await;
-    respond_with_values(result, "distinct_accounts").await
-}
-
-pub async fn filter_values_regions(
-    State(state): State<AppState>,
-    Query(query): Query<FilterValuesQuery>,
-) -> impl IntoResponse {
-    let repo = match resolve_source(&state, query.source_id.as_deref()) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    let result = tokio::task::spawn_blocking(move || repo.distinct_regions()).await;
-    respond_with_values(result, "distinct_regions").await
-}
-
-pub async fn filter_values_tag_keys(
-    State(state): State<AppState>,
-    Query(query): Query<FilterValuesQuery>,
-) -> impl IntoResponse {
-    let repo = match resolve_source(&state, query.source_id.as_deref()) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    let result = tokio::task::spawn_blocking(move || repo.distinct_tag_keys()).await;
-    respond_with_values(result, "distinct_tag_keys").await
-}
-
-pub async fn filter_values_tag_values(
-    State(state): State<AppState>,
-    Query(query): Query<TagValuesQuery>,
-) -> impl IntoResponse {
-    let key = match query.key {
-        Some(k) if !k.is_empty() => k,
-        _ => return bad_request("key is required").into_response(),
-    };
-    let repo = match resolve_source(&state, query.source_id.as_deref()) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    let result = tokio::task::spawn_blocking(move || repo.distinct_tag_values(&key)).await;
-    respond_with_values(result, "distinct_tag_values").await
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/sources
-// ---------------------------------------------------------------------------
-
-/// JSON mirror of `crate::state::SourceStatus`, `#[serde(tag = "state")]` so
-/// each entry's JSON shape is either
-/// `{"state": "registered", "detected_format": "...", "file_count": N}` or
-/// `{"state": "skipped", "reason": "..."}`.
-#[derive(Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SourceStatusResponse {
-    Registered {
-        detected_format: String,
-        file_count: usize,
-    },
-    Skipped {
-        reason: String,
-    },
-}
-
-impl From<&crate::state::SourceStatus> for SourceStatusResponse {
-    fn from(status: &crate::state::SourceStatus) -> Self {
-        match status {
-            crate::state::SourceStatus::Registered {
-                detected_format,
-                file_count,
-            } => SourceStatusResponse::Registered {
-                detected_format: detected_format.clone(),
-                file_count: *file_count,
-            },
-            crate::state::SourceStatus::Skipped { reason } => {
-                SourceStatusResponse::Skipped {
-                    reason: reason.clone(),
-                }
-            }
-        }
-    }
-}
-
-/// JSON mirror of `crate::state::SourceDiagnostic`.
-#[derive(Serialize)]
-pub struct SourceEntry {
-    pub id: String,
-    pub name: String,
-    pub configured_type: data::config::SourceType,
-    #[serde(flatten)]
-    pub status: SourceStatusResponse,
-}
-
-#[derive(Serialize)]
-pub struct SourcesResponse {
-    pub sources: Vec<SourceEntry>,
-    /// The `source_id` that `resolve_source(state, None)` would pick — i.e.
-    /// `state.config.sources.first().id`, mirroring `resolve_source`'s exact
-    /// fallback rule (the first *configured* source, not the first
-    /// *registered* one — if that source happens to be skipped,
-    /// `resolve_source(None)` itself would fail with "unknown source_id",
-    /// which this field intentionally surfaces rather than papers over).
-    pub default_source_id: Option<String>,
-}
-
-pub async fn sources_list(State(state): State<AppState>) -> impl IntoResponse {
-    let sources = state
-        .source_statuses
-        .iter()
-        .map(|d| SourceEntry {
-            id: d.id.clone(),
-            name: d.name.clone(),
-            configured_type: d.configured_type.clone(),
-            status: SourceStatusResponse::from(&d.status),
-        })
-        .collect();
-
-    let default_source_id = state.config.sources.first().map(|s| s.id.clone());
-
-    (
-        StatusCode::OK,
-        Json(SourcesResponse {
-            sources,
-            default_source_id,
-        }),
-    )
+pub async fn settings_source_reload(State(s): State<AppState>, Json(req): Json<SourceIdRequest>) -> Response {
+    run(move || s.reload_source(req)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -848,9 +118,10 @@ mod tests {
     use super::*;
     use crate::routes::build_router;
     use axum::{body::Body, http::Request};
+    use chrono::{TimeZone, Utc};
     use domain::cost::CostSummary;
+    use domain::{cost::CostMetric, filters::CostFilter};
     use http_body_util::BodyExt;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -957,45 +228,50 @@ mod tests {
         }
     }
 
+    fn service_with(sources: Vec<data::config::DataSource>) -> service::CostlyticsService {
+        let config = data::config::AppConfig { server: Default::default(), sources };
+        service::CostlyticsService::new(config, None, Arc::new(service::secrets::MemorySecretStore::default()))
+    }
+
+    fn stub_registered(file_count: usize) -> service::register::Registered {
+        service::register::Registered {
+            repo: Arc::new(StubRepo { summary: stub_summary() }),
+            detected_format: "focus12".into(),
+            file_count,
+            billing_periods: vec![],
+        }
+    }
+
     fn make_state() -> AppState {
-        // Minimal config with one source
-        let source = data::config::DataSource {
+        let svc = service_with(vec![data::config::DataSource {
             id: "test-source".into(),
             name: "Test".into(),
             s3_uri: "fixtures/focus12".into(),
             source_type: data::config::SourceType::Focus12,
-            aws_region: None,
-            aws_profile: None,
-            role_arn: None,
             ..Default::default()
-        };
-        let config = data::config::AppConfig {
-            server: data::config::ServerConfig::default(),
-            sources: vec![source],
-        };
+        }]);
+        svc.registry.set_result("test-source", Ok(stub_registered(3)));
+        Arc::new(svc)
+    }
 
-        let repo: Arc<dyn data::queries::summary::CostRepository> =
-            Arc::new(StubRepo { summary: stub_summary() });
-
-        let mut repos = HashMap::new();
-        repos.insert("test-source".to_string(), repo);
-
-        let source_statuses = vec![crate::state::SourceDiagnostic {
-            id: "test-source".into(),
-            name: "Test".into(),
-            configured_type: data::config::SourceType::Focus12,
-            status: crate::state::SourceStatus::Registered {
-                detected_format: "focus12".into(),
-                file_count: 3,
+    fn make_state_with_mixed_sources() -> AppState {
+        let svc = service_with(vec![
+            data::config::DataSource {
+                id: "good-source".into(),
+                name: "Good Source".into(),
+                s3_uri: "fixtures/focus12".into(),
+                ..Default::default()
             },
-        }];
-
-        AppState {
-            config,
-            pools: HashMap::new(),
-            repos,
-            source_statuses,
-        }
+            data::config::DataSource {
+                id: "broken-source".into(),
+                name: "Broken Source".into(),
+                s3_uri: "fixtures/does-not-exist".into(),
+                ..Default::default()
+            },
+        ]);
+        svc.registry.set_result("good-source", Ok(stub_registered(5)));
+        svc.registry.set_result("broken-source", Err("no Parquet files found via discovery".into()));
+        Arc::new(svc)
     }
 
     // -----------------------------------------------------------------------
@@ -1130,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn summary_with_oversized_service_list_returns_400() {
         let app = build_router(make_state());
-        let services: Vec<String> = (0..(MAX_PREDICATE_VALUES + 1))
+        let services: Vec<String> = (0..1001)
             .map(|i| format!("svc-{i}"))
             .collect();
         let payload = serde_json::json!({
@@ -1153,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn compare_with_oversized_previous_account_list_returns_400() {
         let app = build_router(make_state());
-        let accounts: Vec<String> = (0..(MAX_PREDICATE_VALUES + 1))
+        let accounts: Vec<String> = (0..1001)
             .map(|i| format!("acct-{i}"))
             .collect();
         let payload = serde_json::json!({
@@ -1466,72 +742,6 @@ mod tests {
     // GET /api/v1/sources
     // -----------------------------------------------------------------------
 
-    /// Builds an `AppState` with two configured sources: `good` mirrors
-    /// `make_state`'s registered local-demo-style source (has a `repo`,
-    /// `Registered` status), and `broken` is a deliberately-skipped source
-    /// (no `repo` entry, `Skipped` status with a realistic reason) — as if
-    /// it pointed at an empty/nonexistent directory and schema detection
-    /// never ran. Exercises `sources_list` against a mix, not just the
-    /// trivial single-source case `make_state` covers elsewhere.
-    fn make_state_with_mixed_sources() -> AppState {
-        let good = data::config::DataSource {
-            id: "good-source".into(),
-            name: "Good Source".into(),
-            s3_uri: "fixtures/focus12".into(),
-            source_type: data::config::SourceType::Auto,
-            aws_region: None,
-            aws_profile: None,
-            role_arn: None,
-            ..Default::default()
-        };
-        let broken = data::config::DataSource {
-            id: "broken-source".into(),
-            name: "Broken Source".into(),
-            s3_uri: "fixtures/does-not-exist".into(),
-            source_type: data::config::SourceType::Auto,
-            aws_region: None,
-            aws_profile: None,
-            role_arn: None,
-            ..Default::default()
-        };
-        let config = data::config::AppConfig {
-            server: data::config::ServerConfig::default(),
-            sources: vec![good, broken],
-        };
-
-        let repo: Arc<dyn data::queries::summary::CostRepository> =
-            Arc::new(StubRepo { summary: stub_summary() });
-        let mut repos = HashMap::new();
-        repos.insert("good-source".to_string(), repo);
-
-        let source_statuses = vec![
-            crate::state::SourceDiagnostic {
-                id: "good-source".into(),
-                name: "Good Source".into(),
-                configured_type: data::config::SourceType::Auto,
-                status: crate::state::SourceStatus::Registered {
-                    detected_format: "focus12".into(),
-                    file_count: 5,
-                },
-            },
-            crate::state::SourceDiagnostic {
-                id: "broken-source".into(),
-                name: "Broken Source".into(),
-                configured_type: data::config::SourceType::Auto,
-                status: crate::state::SourceStatus::Skipped {
-                    reason: "no Parquet files found via discovery".into(),
-                },
-            },
-        ];
-
-        AppState {
-            config,
-            pools: HashMap::new(),
-            repos,
-            source_statuses,
-        }
-    }
-
     #[tokio::test]
     async fn sources_list_returns_200_with_mixed_statuses() {
         let app = build_router(make_state_with_mixed_sources());
@@ -1575,16 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn sources_list_empty_config_returns_null_default() {
-        let config = data::config::AppConfig {
-            server: data::config::ServerConfig::default(),
-            sources: vec![],
-        };
-        let state = AppState {
-            config,
-            pools: HashMap::new(),
-            repos: HashMap::new(),
-            source_statuses: vec![],
-        };
+        let state: AppState = Arc::new(service_with(vec![]));
         let app = build_router(state);
         let req = Request::builder()
             .method("GET")
