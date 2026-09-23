@@ -286,8 +286,9 @@ function withActiveSourceIdQuery(path: string): string {
   return `${url.pathname}${url.search}`;
 }
 
-/** Tauri command errors are `service::ServiceError` (`{kind, message}`); argument-deserialization errors are plain strings. */
-function toApiError(err: unknown): ApiError {
+/** Tauri command errors are `service::ServiceError` (`{kind, message}`); argument-deserialization errors are plain strings.
+ * @internal exported for tests */
+export function toApiError(err: unknown): ApiError {
   if (err && typeof err === 'object' && 'message' in err) {
     const e = err as { kind?: unknown; message: unknown };
     return new ApiError(statusForKind(e.kind), { error: String(e.message) });
