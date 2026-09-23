@@ -18,6 +18,8 @@
     "vitest": "5.0.1"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "echarts": "^6.1.0"
   }
 }

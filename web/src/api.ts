@@ -16,6 +16,9 @@
  * narrower internal type of the same family name.
  */
 
+import { invoke } from '@tauri-apps/api/core';
+import { argsFromPath, commandName, isTauri, statusForKind } from './transport.ts';
+
 // ---------------------------------------------------------------------------
 // Shared enums / value types
 // ---------------------------------------------------------------------------
@@ -218,7 +221,7 @@ interface ErrorResponseBody {
   error: string;
 }
 
-/** Thrown by every client function below on a non-2xx HTTP response. */
+/** Thrown by every client function below on a failed request (HTTP non-2xx, or a rejected Tauri command). */
 export class ApiError extends Error {
   readonly status: number;
   readonly body: ErrorResponseBody;
@@ -283,17 +286,38 @@ function withActiveSourceIdQuery(path: string): string {
   return `${url.pathname}${url.search}`;
 }
 
+/** Tauri command errors are `service::ServiceError` (`{kind, message}`); argument-deserialization errors are plain strings. */
+function toApiError(err: unknown): ApiError {
+  if (err && typeof err === 'object' && 'message' in err) {
+    const e = err as { kind?: unknown; message: unknown };
+    return new ApiError(statusForKind(e.kind), { error: String(e.message) });
+  }
+  return new ApiError(400, { error: String(err) });
+}
+
+async function invokeCommand<TResponse>(path: string, req: unknown): Promise<TResponse> {
+  try {
+    return await invoke<TResponse>(commandName(path), { req });
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 async function postJson<TResponse>(path: string, body: unknown): Promise<TResponse> {
+  const withSource = withActiveSourceId(body);
+  if (isTauri()) return invokeCommand<TResponse>(path, withSource);
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(withActiveSourceId(body)),
+    body: JSON.stringify(withSource),
   });
   return parseJsonOrThrow<TResponse>(res);
 }
 
 async function getJson<TResponse>(path: string): Promise<TResponse> {
-  const res = await fetch(withActiveSourceIdQuery(path), {
+  const withSource = withActiveSourceIdQuery(path);
+  if (isTauri()) return invokeCommand<TResponse>(withSource, argsFromPath(withSource));
+  const res = await fetch(withSource, {
     method: 'GET',
     headers: { 'content-type': 'application/json' },
   });
@@ -371,7 +395,8 @@ export interface SourceStatus {
   id: string;
   name: string;
   configured_type: ConfiguredSourceType;
-  state: 'registered' | 'skipped';
+  state: 'pending' | 'registered' | 'skipped';
+  /** `pending`: registration still running (startup, save or reload). */
   /** Present only when `state === 'registered'`. */
   detected_format?: string;
   /** Present only when `state === 'registered'`. */
@@ -395,4 +420,66 @@ export interface SourcesResponse {
 
 export async function getSources(): Promise<SourcesResponse> {
   return getJson<SourcesResponse>('/api/v1/sources');
+}
+
+// ---------------------------------------------------------------------------
+// Settings (`service::app` in crates/service/src/app.rs)
+// ---------------------------------------------------------------------------
+
+/** `data::config::S3AuthConfig` wire shape. */
+export type SourceAuth = { type: 'credential_chain' } | { type: 'access_key'; key_id: string };
+
+/** `data::config::DataSource` wire shape. `s3_uri` is an `s3://` URI or a local folder path. */
+export interface DataSourceSettings {
+  id: string;
+  name: string;
+  s3_uri: string;
+  source_type: ConfiguredSourceType;
+  aws_region?: string | null;
+  aws_profile?: string | null;
+  role_arn?: string | null;
+  auth: SourceAuth;
+}
+
+export interface SourceSettings extends DataSourceSettings {
+  /** An access-key secret is stored in the OS keychain (the secret itself is never sent). */
+  has_secret: boolean;
+}
+
+export interface SettingsResponse {
+  sources: SourceSettings[];
+}
+
+export interface TestSourceResponse {
+  detected_format: string;
+  file_count: number;
+  billing_periods: string[];
+}
+
+export async function getSettings(): Promise<SettingsResponse> {
+  return getJson<SettingsResponse>('/api/v1/settings');
+}
+
+/** `secret`: a new access-key secret, or `null` to keep the stored one. */
+export async function saveSource(
+  source: DataSourceSettings,
+  secret: string | null,
+  isNew: boolean,
+): Promise<SourceStatus> {
+  return postJson<SourceStatus>('/api/v1/settings/source-save', { source, secret, is_new: isNew });
+}
+
+export async function testSource(
+  source: DataSourceSettings,
+  secret: string | null,
+): Promise<TestSourceResponse> {
+  return postJson<TestSourceResponse>('/api/v1/settings/source-test', { source, secret });
+}
+
+export async function deleteSource(id: string): Promise<SourcesResponse> {
+  return postJson<SourcesResponse>('/api/v1/settings/source-delete', { id });
+}
+
+export async function reloadSource(id: string): Promise<SourceStatus> {
+  return postJson<SourceStatus>('/api/v1/settings/source-reload', { id });
 }
