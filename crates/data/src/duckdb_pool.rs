@@ -16,7 +16,7 @@ pub enum DbError {
 }
 
 /// Credentials DuckDB uses to read an `s3://` source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum S3Auth {
     /// AWS credential chain (env, `~/.aws` profiles/SSO, instance role).
     CredentialChain {
@@ -29,6 +29,30 @@ pub enum S3Auth {
         secret: String,
         region: Option<String>,
     },
+}
+
+impl std::fmt::Debug for S3Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            S3Auth::CredentialChain { profile, region } => {
+                f.debug_struct("CredentialChain")
+                    .field("profile", profile)
+                    .field("region", region)
+                    .finish()
+            }
+            S3Auth::AccessKey {
+                key_id,
+                secret: _,
+                region,
+            } => {
+                f.debug_struct("AccessKey")
+                    .field("key_id", key_id)
+                    .field("secret", &"***")
+                    .field("region", region)
+                    .finish()
+            }
+        }
+    }
 }
 
 /// Quote `s` as a DuckDB string literal (`'` doubled).
@@ -171,6 +195,18 @@ mod tests {
         });
         assert!(sql.contains("KEY_ID 'a''b'"));
         assert!(sql.contains("SECRET 'x''); DROP TABLE t; --'"));
+    }
+
+    #[test]
+    fn debug_redacts_secret() {
+        let auth = S3Auth::AccessKey {
+            key_id: "AKIA".into(),
+            secret: "s3cr3t".into(),
+            region: None,
+        };
+        let debug_str = format!("{:?}", auth);
+        assert!(!debug_str.contains("s3cr3t"));
+        assert!(debug_str.contains("AKIA"));
     }
 
     #[test]
