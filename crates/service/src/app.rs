@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use data::config::{AppConfig, DataSource, S3AuthConfig};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,12 @@ pub struct CostlyticsService {
     config: RwLock<AppConfig>,
     settings_path: Option<PathBuf>,
     secrets: Arc<dyn SecretStore>,
+    /// Serializes `save_source`/`delete_source`'s read-modify-write of
+    /// `config` (and the keychain write that goes with it), so two
+    /// concurrent calls can't both read the same base and silently drop
+    /// each other's change. Held only across the read-check-persist-write
+    /// section, never across registration I/O (see below).
+    mutation: Mutex<()>,
 }
 
 fn validate_source(s: &DataSource) -> Result<(), ServiceError> {
@@ -92,7 +98,7 @@ impl CostlyticsService {
         for source in &config.sources {
             registry.mark_pending(source);
         }
-        Self { registry, config: RwLock::new(config), settings_path, secrets }
+        Self { registry, config: RwLock::new(config), settings_path, secrets, mutation: Mutex::new(()) }
     }
 
     fn config(&self) -> AppConfig {
@@ -176,10 +182,31 @@ impl CostlyticsService {
         SettingsResponse { sources }
     }
 
+    /// Best-effort restore of a source's keychain entry to `previous` after
+    /// a failed `persist`, so we never leave the keychain out of sync with
+    /// the config file. Never logs the secret itself.
+    fn restore_secret(&self, id: &str, previous: Option<&str>) {
+        let result = match previous {
+            Some(s) => self.secrets.set(id, s),
+            None => self.secrets.delete(id),
+        };
+        if let Err(e) = result {
+            tracing::warn!(source_id = %id, error = %e, "failed to roll back keychain entry after a failed save");
+        }
+    }
+
     pub fn save_source(&self, req: SaveSourceRequest) -> Result<SourceEntry, ServiceError> {
         let mut source = req.source;
         source.s3_uri = source.s3_uri.trim().to_string();
         validate_source(&source)?;
+
+        // Held from the existence check through the in-memory write-back so
+        // two concurrent saves can't both read the same base config and
+        // silently drop each other's change (a lost update). Released
+        // before registration I/O runs, so a slow S3 source never blocks
+        // other saves/deletes.
+        let _guard = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+
         let exists = self.find(&source.id).is_some();
         if req.is_new && exists {
             return Err(ServiceError::conflict(format!("a source with id '{}' already exists", source.id)));
@@ -189,6 +216,7 @@ impl CostlyticsService {
         }
         let secret = self.resolve_secret(&source, req.secret.as_deref())?;
 
+        let previous = self.stored_secret(&source.id);
         match &secret {
             Some(s) => self.secrets.set(&source.id, s),
             None => self.secrets.delete(&source.id),
@@ -200,14 +228,22 @@ impl CostlyticsService {
             Some(existing) => *existing = source.clone(),
             None => config.sources.push(source.clone()),
         }
-        self.persist(&config)?;
+        if let Err(e) = self.persist(&config) {
+            self.restore_secret(&source.id, previous.as_deref());
+            return Err(e);
+        }
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+        drop(_guard);
 
         self.register_one(&source, secret.as_deref());
         self.entry(&source.id)
     }
 
     pub fn delete_source(&self, req: SourceIdRequest) -> Result<SourcesResponse, ServiceError> {
+        // See `save_source` for why this is held only across the
+        // read-check-persist-write section.
+        let _guard = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut config = self.config();
         let before = config.sources.len();
         config.sources.retain(|s| s.id != req.id);
@@ -216,6 +252,7 @@ impl CostlyticsService {
         }
         self.persist(&config)?;
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+        drop(_guard);
         if let Err(e) = self.secrets.delete(&req.id) {
             tracing::warn!(source_id = %req.id, error = %e, "could not delete secret from keychain");
         }
@@ -372,5 +409,65 @@ mod tests {
         save(&f, local("r", &f.fixture_path), None, true).unwrap();
         let entry = f.svc.reload_source(SourceIdRequest { id: "r".into() }).unwrap();
         assert!(matches!(entry.status, crate::sources::SourceStatusResponse::Registered { .. }));
+    }
+
+    #[test]
+    fn failed_persist_rolls_back_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("focus12");
+        data::fixtures::generate_focus12_fixture(&data_dir).unwrap();
+        // No such directory exists, so `AppConfig::save` fails.
+        let settings_path = dir.path().join("does-not-exist").join("settings.toml");
+        let secrets = Arc::new(MemorySecretStore::default());
+        let svc = CostlyticsService::new(AppConfig::default(), Some(settings_path), secrets.clone());
+
+        let mut s = local("k", data_dir.to_str().unwrap());
+        s.auth = S3AuthConfig::AccessKey { key_id: "AKIA".into() };
+        let err = svc.save_source(SaveSourceRequest { source: s, secret: Some("TOPSECRET".into()), is_new: true });
+        assert!(err.is_err());
+        assert_eq!(secrets.get("k").unwrap(), None);
+    }
+
+    #[test]
+    fn concurrent_saves_do_not_lose_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("focus12");
+        data::fixtures::generate_focus12_fixture(&data_dir).unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let secrets = Arc::new(MemorySecretStore::default());
+        let svc = Arc::new(CostlyticsService::new(
+            AppConfig::default(),
+            Some(settings_path.clone()),
+            secrets,
+        ));
+        let fixture_path = data_dir.to_str().unwrap().to_string();
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let svc = svc.clone();
+                let fixture_path = fixture_path.clone();
+                std::thread::spawn(move || {
+                    let id = format!("s{i}");
+                    svc.save_source(SaveSourceRequest {
+                        source: local(&id, &fixture_path),
+                        secret: None,
+                        is_new: true,
+                    })
+                    .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mut ids: Vec<_> = svc.settings().sources.into_iter().map(|s| s.source.id).collect();
+        ids.sort();
+        assert_eq!(ids, (0..8).map(|i| format!("s{i}")).collect::<Vec<_>>());
+
+        let on_disk = AppConfig::load(settings_path.to_str().unwrap()).unwrap();
+        let mut disk_ids: Vec<_> = on_disk.sources.into_iter().map(|s| s.id).collect();
+        disk_ids.sort();
+        assert_eq!(disk_ids, (0..8).map(|i| format!("s{i}")).collect::<Vec<_>>());
     }
 }
