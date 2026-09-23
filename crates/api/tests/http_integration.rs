@@ -30,6 +30,7 @@ async fn http_cost_summary_matches_fixture_total() {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         }],
     };
 
@@ -84,6 +85,7 @@ async fn http_cost_summary_matches_focus10_fixture_total() {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         }],
     };
 
@@ -137,6 +139,7 @@ async fn cur2_cost_summary_total(metric: &str) -> f64 {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         }],
     };
 
@@ -207,6 +210,7 @@ async fn http_timeseries_matches_fixture_total() {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         }],
     };
 
@@ -268,6 +272,7 @@ async fn http_filter_values_and_compare_over_real_http() {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         }],
     };
 
@@ -373,6 +378,7 @@ async fn http_sources_list_reflects_configured_sources() {
                 aws_region: None,
                 aws_profile: None,
                 role_arn: None,
+                ..Default::default()
             },
             DataSource {
                 id: "s3-broken".into(),
@@ -382,6 +388,7 @@ async fn http_sources_list_reflects_configured_sources() {
                 aws_region: None,
                 aws_profile: None,
                 role_arn: None,
+                ..Default::default()
             },
         ],
     };

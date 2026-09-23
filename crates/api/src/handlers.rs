@@ -967,6 +967,7 @@ mod tests {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         };
         let config = data::config::AppConfig {
             server: data::config::ServerConfig::default(),
@@ -1481,6 +1482,7 @@ mod tests {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         };
         let broken = data::config::DataSource {
             id: "broken-source".into(),
@@ -1490,6 +1492,7 @@ mod tests {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         };
         let config = data::config::AppConfig {
             server: data::config::ServerConfig::default(),

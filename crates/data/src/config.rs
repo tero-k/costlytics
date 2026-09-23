@@ -7,6 +7,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("TOML parse error: {0}")]
     Toml(#[from] toml::de::Error),
+    #[error("TOML serialize error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
     #[error("Invalid port in COSTLYTICS_PORT: {0}")]
     InvalidPort(#[from] std::num::ParseIntError),
 }
@@ -36,7 +38,21 @@ pub enum SourceType {
     Focus12,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// How DuckDB authenticates to S3 for an `s3://` source. Ignored for local
+/// sources. The access-key *secret* is never part of this type — it lives
+/// in the OS keychain (see `service::secrets`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum S3AuthConfig {
+    /// AWS credential chain: env vars, `~/.aws` config/SSO, instance role.
+    /// `DataSource::aws_profile` optionally pins a named profile.
+    #[default]
+    CredentialChain,
+    /// Static access key; the secret half is stored in the OS keychain.
+    AccessKey { key_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
 pub struct DataSource {
     pub id: String,
     pub name: String,
@@ -47,6 +63,8 @@ pub struct DataSource {
     pub aws_region: Option<String>,
     pub aws_profile: Option<String>,
     pub role_arn: Option<String>,
+    #[serde(default)]
+    pub auth: S3AuthConfig,
 }
 
 impl DataSource {
@@ -92,6 +110,13 @@ impl AppConfig {
         }
         Ok(cfg)
     }
+
+    /// Write this config as TOML to `path` (used by the desktop Settings tab).
+    pub fn save(&self, path: &std::path::Path) -> Result<(), ConfigError> {
+        let text = toml::to_string_pretty(self)?;
+        std::fs::write(path, text)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +139,7 @@ mod tests {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         };
         assert!(ds.is_s3());
     }
@@ -128,6 +154,7 @@ mod tests {
             aws_region: None,
             aws_profile: None,
             role_arn: None,
+            ..Default::default()
         };
         assert!(!ds.is_s3());
     }
@@ -185,5 +212,44 @@ aws_region = "eu-west-1"
         std::env::remove_var("COSTLYTICS_HOST");
         assert_eq!(cfg.server.port, 9999);
         assert_eq!(cfg.server.host, "192.168.1.1");
+    }
+
+    #[test]
+    fn auth_defaults_to_credential_chain_when_absent() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[[sources]]
+id = "a"
+name = "A"
+s3_uri = "s3://b/p/"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sources[0].auth, S3AuthConfig::CredentialChain);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_access_key_auth() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("COSTLYTICS_PORT");
+        std::env::remove_var("COSTLYTICS_HOST");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let cfg = AppConfig {
+            server: ServerConfig::default(),
+            sources: vec![DataSource {
+                id: "prod".into(),
+                name: "Prod".into(),
+                s3_uri: "s3://bucket/exports/data".into(),
+                aws_region: Some("eu-north-1".into()),
+                auth: S3AuthConfig::AccessKey { key_id: "AKIAEXAMPLE".into() },
+                ..Default::default()
+            }],
+        };
+        cfg.save(&path).unwrap();
+        let loaded = AppConfig::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.sources, cfg.sources);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.to_lowercase().contains("secret"), "settings file must never hold a secret: {text}");
     }
 }
