@@ -36,3 +36,17 @@ test('invalid S3 URI is rejected with a readable error', async ({ page }) => {
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.locator('#source-test-result')).toContainText('S3 URI must include a bucket');
 });
+
+// A row-action (Reload/Delete) error must surface somewhere visible even
+// though the add/edit form section is hidden — `#sources-message`, not
+// `#source-test-result`, is where it has to land.
+test('a failed Reload surfaces its error in the page-level message', async ({ page }) => {
+  await page.route('**/api/v1/settings/source-reload', (route) =>
+    route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) }),
+  );
+
+  await page.goto('/settings.html');
+  const row = page.locator('#sources-table tr[data-id="local-demo"]');
+  await row.getByRole('button', { name: 'Reload' }).click();
+  await expect(page.locator('#sources-message')).toContainText('boom');
+});

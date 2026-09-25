@@ -28,6 +28,13 @@ let editing: SourceSettings | null = null;
 /** Id whose Delete button is armed (second click confirms). */
 let armedDelete: string | null = null;
 
+const REFRESH_POLL_MS = 1000;
+/** ~2 minutes: mirrors `sourcePicker.ts`'s `PENDING_POLL_LIMIT`, so a stuck
+ * pending source stops this page's re-poll instead of running forever. */
+const REFRESH_POLL_LIMIT = 120;
+/** Consecutive pending-triggered `refresh()` calls so far; reset to 0 as soon as nothing is pending. */
+let pendingPollAttempts = 0;
+
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector<T>(sel)!;
 
 function statusCell(s: SourceStatus | undefined): string {
@@ -79,7 +86,12 @@ async function refresh(): Promise<void> {
     const [s, statuses] = await Promise.all([getSettings(), getSources()]);
     settings = s.sources;
     renderTable(statuses.sources);
-    if (statuses.sources.some((x) => x.state === 'pending')) setTimeout(() => void refresh(), 1000);
+    if (statuses.sources.some((x) => x.state === 'pending')) {
+      pendingPollAttempts += 1;
+      if (pendingPollAttempts < REFRESH_POLL_LIMIT) setTimeout(() => void refresh(), REFRESH_POLL_MS);
+    } else {
+      pendingPollAttempts = 0;
+    }
   } catch (err) {
     $('#sources-table').innerHTML = `<div class="table-status table-error">${escapeHtml(errorMessage(err))}</div>`;
   }
@@ -128,6 +140,20 @@ function syncVisibility(): void {
 
 function setResult(message: string, ok: boolean): void {
   const el = $('#source-test-result');
+  el.textContent = message;
+  el.className = `form-result ${ok ? 'change-good' : 'change-bad'}`;
+}
+
+/**
+ * Unlike `setResult` (which writes into `#source-test-result`, inside the
+ * add/edit form section and thus invisible whenever that section is
+ * `hidden`), this writes into the always-visible `#sources-message` right
+ * under the table — used for row-action (reload/delete) errors and the
+ * "saved, but skipped" outcome, none of which can rely on the form being
+ * open to be seen.
+ */
+function setPageMessage(message: string, ok: boolean): void {
+  const el = $('#sources-message');
   el.textContent = message;
   el.className = `form-result ${ok ? 'change-good' : 'change-bad'}`;
 }
@@ -183,8 +209,9 @@ async function onSave(): Promise<void> {
   try {
     const status = await saveSource(formToSource(readForm()), secretValue(), editing === null);
     closeForm();
+    setPageMessage('', true);
     await refresh();
-    if (status.state === 'skipped') setResult(`Saved, but the source was skipped: ${status.reason ?? ''}`, false);
+    if (status.state === 'skipped') setPageMessage(`Saved, but the source was skipped: ${status.reason ?? ''}`, false);
   } catch (err) {
     setResult(errorMessage(err), false);
   }
@@ -195,6 +222,7 @@ async function onRowAction(id: string, action: string): Promise<void> {
   if (action === 'edit') return openForm(source);
   if (action === 'reload') {
     await reloadSource(id);
+    setPageMessage('', true);
     return refresh();
   }
   if (action === 'delete') {
@@ -203,9 +231,13 @@ async function onRowAction(id: string, action: string): Promise<void> {
       return refresh();
     }
     armedDelete = null;
-    await deleteSource(id);
-    if (editing?.id === id) closeForm();
-    return refresh();
+    try {
+      await deleteSource(id);
+      if (editing?.id === id) closeForm();
+      setPageMessage('', true);
+    } finally {
+      await refresh();
+    }
   }
 }
 
@@ -229,7 +261,7 @@ function bind(): void {
     const row = button?.closest<HTMLElement>('tr[data-id]');
     if (!button || !row) return;
     void withBusy(button, () =>
-      onRowAction(row.dataset.id!, button.dataset.action!).catch((err) => setResult(errorMessage(err), false)),
+      onRowAction(row.dataset.id!, button.dataset.action!).catch((err) => setPageMessage(errorMessage(err), false)),
     );
   });
 }
