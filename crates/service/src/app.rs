@@ -138,29 +138,58 @@ impl CostlyticsService {
         Ok(())
     }
 
-    /// Blocking: (re)registers one source, updating the registry.
+    /// Blocking: (re)registers one source, updating the registry. Uses
+    /// `mark_pending`'s generation so a result made stale by a concurrent
+    /// `mark_pending`/`remove` for the same id (another save, reload, or
+    /// `register_all` racing a Settings change) is discarded instead of
+    /// clobbering a newer outcome — see `SourceRegistry::set_result_if_current`.
     fn register_one(&self, source: &DataSource, secret: Option<&str>) {
-        self.registry.mark_pending(source);
+        let generation = self.registry.mark_pending(source);
         let result = register_source(source, secret);
         match &result {
             Ok(r) => tracing::info!(source_id = %source.id, file_count = r.file_count, format = %r.detected_format, "source registered"),
             Err(reason) => tracing::warn!(source_id = %source.id, %reason, "source skipped"),
         }
-        self.registry.set_result(&source.id, result);
+        self.registry.set_result_if_current(&source.id, generation, result);
     }
 
     fn entry(&self, id: &str) -> Result<SourceEntry, ServiceError> {
         entry_for(&self.registry, id).ok_or_else(|| ServiceError::not_found(format!("unknown source '{id}'")))
     }
 
-    /// Blocking: registers every configured source, in order.
+    /// Blocking: registers every configured source, in order. Runs in the
+    /// background at startup, so it may race a Settings save/delete for the
+    /// same id. For each source, re-checks (under `mutation`) that the
+    /// source is still configured unchanged before calling `mark_pending`,
+    /// then registers outside the lock and applies the result only if it's
+    /// still current (`SourceRegistry::set_result_if_current`) — so a
+    /// source deleted mid-registration can't be resurrected by a stale
+    /// result, and a save/reload that raced this one always wins.
     pub fn register_all(&self) {
         for source in self.config().sources {
+            let generation = {
+                let _guard = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+                let current = self.config();
+                match current.sources.iter().find(|s| s.id == source.id) {
+                    Some(s) if *s == source => Some(self.registry.mark_pending(&source)),
+                    _ => None,
+                }
+            };
+            let Some(generation) = generation else {
+                tracing::info!(source_id = %source.id, "source changed or removed before registration; skipping");
+                continue;
+            };
+
             let secret = match source.auth {
                 S3AuthConfig::AccessKey { .. } => self.stored_secret(&source.id),
                 S3AuthConfig::CredentialChain => None,
             };
-            self.register_one(&source, secret.as_deref());
+            let result = register_source(&source, secret.as_deref());
+            match &result {
+                Ok(r) => tracing::info!(source_id = %source.id, file_count = r.file_count, format = %r.detected_format, "source registered"),
+                Err(reason) => tracing::warn!(source_id = %source.id, %reason, "source skipped"),
+            }
+            self.registry.set_result_if_current(&source.id, generation, result);
         }
     }
 
@@ -469,5 +498,110 @@ mod tests {
         let mut disk_ids: Vec<_> = on_disk.sources.into_iter().map(|s| s.id).collect();
         disk_ids.sort();
         assert_eq!(disk_ids, (0..8).map(|i| format!("s{i}")).collect::<Vec<_>>());
+    }
+
+    /// (a) `register_one` discards a stale generation's result. Simulated
+    /// by re-marking the source pending (bumping its generation) between
+    /// two calls to `register_one` for the same id, mirroring what a
+    /// concurrent reload/save would do to a slower `register_all` pass.
+    #[test]
+    fn register_one_ignores_a_result_made_stale_by_a_concurrent_mark_pending() {
+        let f = fixture();
+        let source = local("a", &f.fixture_path);
+
+        // First registration.
+        f.svc.register_one(&source, None);
+        assert!(matches!(
+            f.svc.registry.diagnostics()[0].status,
+            crate::registry::SourceStatus::Registered { .. }
+        ));
+
+        // A concurrent operation (e.g. a reload) bumps the generation via
+        // `mark_pending` directly, without registering yet.
+        f.svc.registry.mark_pending(&source);
+        assert_eq!(f.svc.registry.diagnostics()[0].status, crate::registry::SourceStatus::Pending);
+
+        // `register_one`'s own generation (captured before this point) is
+        // now stale; applying it must not clobber the newer `Pending` state
+        // with an outcome computed for the superseded generation.
+        f.svc.registry.set_result_if_current(
+            "a",
+            0, // the first call's generation
+            Err("stale result from the first registration".into()),
+        );
+        assert_eq!(
+            f.svc.registry.diagnostics()[0].status,
+            crate::registry::SourceStatus::Pending,
+            "a stale generation's result must be discarded, not applied"
+        );
+    }
+
+    /// (b) A result for a source removed after `mark_pending` doesn't
+    /// re-add it to the registry.
+    #[test]
+    fn result_for_a_source_removed_after_mark_pending_does_not_re_add_it() {
+        let f = fixture();
+        let source = local("a", &f.fixture_path);
+        let generation = f.svc.registry.mark_pending(&source);
+
+        f.svc.registry.remove("a");
+        assert!(f.svc.registry.diagnostics().is_empty());
+
+        // A registration that was already in flight for "a" completes
+        // after it was removed (e.g. by `delete_source`); its result must
+        // not resurrect the diagnostic.
+        let result = register_source(&source, None);
+        f.svc.registry.set_result_if_current("a", generation, result);
+        assert!(f.svc.registry.diagnostics().is_empty());
+        assert!(f.svc.sources().sources.is_empty());
+    }
+
+    /// (c) If a source is deleted from the config before `register_all`
+    /// reaches it, it never appears in the registry. Uses the `mutation`
+    /// lock (held here before spawning the `register_all` thread) to force
+    /// the deletion to land before `register_all`'s per-source re-check for
+    /// either source can run, rather than relying on timing.
+    #[test]
+    fn register_all_skips_a_source_deleted_before_it_reaches_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("focus12");
+        data::fixtures::generate_focus12_fixture(&data_dir).unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let secrets = Arc::new(MemorySecretStore::default());
+        let svc = Arc::new(CostlyticsService::new(AppConfig::default(), Some(settings_path), secrets));
+        let fixture_path = data_dir.to_str().unwrap().to_string();
+
+        svc.save_source(SaveSourceRequest { source: local("a", &fixture_path), secret: None, is_new: true })
+            .unwrap();
+        svc.save_source(SaveSourceRequest { source: local("b", &fixture_path), secret: None, is_new: true })
+            .unwrap();
+
+        // Hold `mutation` so `register_all`'s per-source checks (for both
+        // "a" and "b") cannot start until the deletion below has already
+        // landed.
+        let guard = svc.mutation.lock().unwrap();
+
+        let register_handle = {
+            let svc = svc.clone();
+            std::thread::spawn(move || svc.register_all())
+        };
+
+        // Delete "b" directly (bypassing `delete_source`, which would also
+        // need `mutation` and thus deadlock against the guard above) while
+        // `register_all`'s thread is blocked waiting for the lock.
+        {
+            let mut cfg = svc.config.write().unwrap();
+            cfg.sources.retain(|s| s.id != "b");
+        }
+        svc.registry.remove("b");
+
+        drop(guard);
+        register_handle.join().unwrap();
+
+        assert!(svc.registry.diagnostics().iter().all(|d| d.id != "b"));
+        assert!(svc.sources().sources.iter().all(|s| s.id != "b"));
+        // "a" was untouched and still gets registered normally.
+        assert!(svc.registry.diagnostics().iter().any(|d| d.id == "a"
+            && matches!(d.status, crate::registry::SourceStatus::Registered { .. })));
     }
 }
