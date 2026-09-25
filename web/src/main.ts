@@ -40,11 +40,14 @@ async function bootstrap(): Promise<void> {
   // Must resolve before any component's first fetch fires (see
   // `shared/sourcePicker.ts`'s doc comment) — awaited here, ahead of the
   // `Promise.allSettled` below.
-  const registeredIds = await initSourcePicker();
-  if (registeredIds !== null && registeredIds.length === 0) {
+  const sourceResult = await initSourcePicker();
+  if (sourceResult !== null && sourceResult.registered.length === 0) {
     // Loaded fine, but nothing is registered: guide the user to Settings
-    // instead of rendering four error states.
-    document.querySelector<HTMLElement>('#no-sources')?.removeAttribute('hidden');
+    // instead of rendering four error states. Distinguish "nothing
+    // configured yet" from "configured but none loaded" — see
+    // `#no-sources`/`#no-sources-configured` in `index.html`.
+    const emptyStateId = sourceResult.configured === 0 ? '#no-sources' : '#no-sources-configured';
+    document.querySelector<HTMLElement>(emptyStateId)?.removeAttribute('hidden');
     return;
   }
 

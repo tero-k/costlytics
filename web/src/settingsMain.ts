@@ -198,6 +198,13 @@ async function onTest(): Promise<void> {
   setResult('Testing…', true);
   try {
     const r = await testSource(formToSource(readForm()), secretValue());
+    if (r.file_count === 0) {
+      setResult(
+        'No billing data found at this location — point it at the folder containing BILLING_PERIOD=YYYY-MM directories.',
+        false,
+      );
+      return;
+    }
     const periods = r.billing_periods.length ? `${r.billing_periods[0]} – ${r.billing_periods[r.billing_periods.length - 1]}` : 'none';
     setResult(`OK: ${r.detected_format}, ${r.file_count} files, billing periods ${periods}`, true);
   } catch (err) {

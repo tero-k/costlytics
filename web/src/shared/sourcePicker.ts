@@ -52,18 +52,60 @@
 
 import { getSources, setActiveSourceId, type SourcesResponse } from '../api.ts';
 import { createDimensionPicker } from './dimensionPicker.ts';
+import { setLoadingIndicatorVisible } from './statusBar.ts';
 
 const PENDING_POLL_MS = 500;
 /** ~2 minutes: a slow S3 source must not block the page forever. */
 const PENDING_POLL_LIMIT = 240;
 
-/** Re-fetches while any source is still registering (desktop startup runs registration in the background). */
+/**
+ * Re-fetches while any source is still registering (desktop startup runs
+ * registration in the background). Shows the shared "loading sources" state
+ * — the status bar's loading indicator plus the `#source-picker`
+ * placeholder text — for as long as any source is pending, so the page
+ * doesn't sit blank for up to `PENDING_POLL_LIMIT` attempts before any
+ * indicator appears. Both are restored (indicator hidden, placeholder text
+ * reset) before returning, whether the loop settles normally or times out,
+ * so nothing is left stuck visible for the caller's own loading state (see
+ * callers of `setLoadingIndicatorVisible` in `main.ts`/`explorerMain.ts`/etc,
+ * which take over the indicator right after `initSourcePicker` resolves).
+ */
 async function getSettledSources(): Promise<SourcesResponse> {
-  for (let attempt = 0; ; attempt++) {
-    const res = await getSources();
-    if (!res.sources.some((s) => s.state === 'pending') || attempt >= PENDING_POLL_LIMIT) return res;
-    await new Promise((resolve) => setTimeout(resolve, PENDING_POLL_MS));
+  // `#source-picker` may be absent on a page that doesn't use it.
+  const placeholder = document.querySelector<HTMLOptionElement>('#source-picker option[value=""]');
+  const originalPlaceholderText = placeholder?.textContent ?? null;
+  let shownLoading = false;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const res = await getSources();
+      if (!res.sources.some((s) => s.state === 'pending') || attempt >= PENDING_POLL_LIMIT) return res;
+      if (!shownLoading) {
+        shownLoading = true;
+        setLoadingIndicatorVisible(true);
+      }
+      if (placeholder) placeholder.textContent = 'Loading sources…';
+      await new Promise((resolve) => setTimeout(resolve, PENDING_POLL_MS));
+    }
+  } finally {
+    if (shownLoading) {
+      setLoadingIndicatorVisible(false);
+      if (placeholder && originalPlaceholderText !== null) placeholder.textContent = originalPlaceholderText;
+    }
   }
+}
+
+/**
+ * `initSourcePicker`'s resolved value: which sources are registered, plus
+ * how many were configured at all — a page needs both to distinguish "no
+ * sources configured yet" (point the user at Settings to add one) from
+ * "sources are configured, but none loaded" (point them at Settings to see
+ * why, e.g. all skipped) — see `main.ts`'s `#no-sources` empty state.
+ */
+export interface SourcePickerResult {
+  /** Registered source ids, alphabetically sorted. */
+  registered: string[];
+  /** Count of all configured sources, registered or not. */
+  configured: number;
 }
 
 /**
@@ -72,20 +114,22 @@ async function getSettledSources(): Promise<SourcesResponse> {
  * `PENDING_POLL_LIMIT` attempts) so a source still registering on desktop
  * startup doesn't get treated as permanently unregistered.
  *
- * Resolves with the list of registered source ids once loaded, or `null` if
- * `getSources()` itself failed (backend down) — callers use this to tell
- * "loaded fine, zero sources registered" (empty array) apart from "couldn't
- * even load" (`null`), which call for different UI treatment.
+ * Resolves with the registered ids and configured count once loaded, or
+ * `null` if `getSources()` itself failed (backend down) — callers use this
+ * to tell "loaded fine" (an object, however many are registered) apart from
+ * "couldn't even load" (`null`), which call for different UI treatment.
  */
 export async function initSourcePicker(
   onSourceChange?: (sourceId: string | null) => void,
-): Promise<string[] | null> {
+): Promise<SourcePickerResult | null> {
   const picker = createDimensionPicker({ paramName: 'source', elementId: 'source-picker' });
 
   let ids: string[] = [];
+  let configured = 0;
   let loaded = false;
   try {
     const { sources, default_source_id } = await getSettledSources();
+    configured = sources.length;
     ids = sources
       .filter((s) => s.state === 'registered')
       .map((s) => s.id)
@@ -96,8 +140,9 @@ export async function initSourcePicker(
       picker.updateUrlParam(default_source_id);
     }
   } catch {
-    // Leave `ids` empty; the picker shows only its placeholder option and
-    // every request goes out without `source_id` (backend fallback).
+    // Leave `ids`/`configured` at their zero defaults; the picker shows
+    // only its placeholder option and every request goes out without
+    // `source_id` (backend fallback).
   }
 
   const initial = picker.populateOptions(ids);
@@ -125,5 +170,5 @@ export async function initSourcePicker(
     onSourceChange?.(value);
   });
 
-  return loaded ? ids : null;
+  return loaded ? { registered: ids, configured } : null;
 }
