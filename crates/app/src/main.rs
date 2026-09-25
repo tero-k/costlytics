@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use service::CostlyticsService;
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -25,9 +26,22 @@ fn main() {
                 std::fs::create_dir_all(dir)?;
             }
             tracing::info!(path = %settings_path.display(), "loading settings");
-            let config = data::config::AppConfig::load(
-                settings_path.to_str().ok_or("settings path is not valid UTF-8")?,
-            )?;
+            let settings_path_str = settings_path.to_str().ok_or("settings path is not valid UTF-8")?;
+            let config = match data::config::AppConfig::load(settings_path_str) {
+                Ok(config) => config,
+                Err(e) => {
+                    tracing::error!(path = %settings_path.display(), error = %e, "failed to load settings");
+                    app.dialog()
+                        .message(format!(
+                            "Costlytics could not load its settings file:\n\n{}\n\n{e}",
+                            settings_path.display()
+                        ))
+                        .kind(MessageDialogKind::Error)
+                        .title("Costlytics")
+                        .blocking_show();
+                    return Err(e.into());
+                }
+            };
             let svc = Arc::new(CostlyticsService::new(
                 config,
                 Some(settings_path),
