@@ -41,6 +41,18 @@ pub fn default_discovery_range() -> (NaiveDate, NaiveDate) {
     (start, next_ym.end_date_exclusive())
 }
 
+/// Replaces every occurrence of `secret` in `text` with `***`, so an error
+/// string that happens to embed a raw access-key secret (e.g. from a DuckDB
+/// error message that echoes the credentials it was given) never reaches a
+/// log line or a skip reason shown in Settings. A no-op if `secret` is empty
+/// (an empty needle would match everywhere and corrupt the text).
+fn scrub_secret(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return text.to_string();
+    }
+    text.replace(secret, "***")
+}
+
 fn s3_auth(source: &DataSource, secret: Option<&str>) -> Result<S3Auth, String> {
     match &source.auth {
         S3AuthConfig::CredentialChain => Ok(S3Auth::CredentialChain {
@@ -79,8 +91,13 @@ pub fn register_source(source: &DataSource, secret: Option<&str>) -> Result<Regi
     let (range_start, range_end) = default_discovery_range();
     let partitions = match &auth {
         Some(auth) => {
-            duckdb_pool::init_connection(&conn, auth)
-                .map_err(|e| format!("failed to initialise S3 access (httpfs/aws extensions, credentials): {e}"))?;
+            duckdb_pool::init_connection(&conn, auth).map_err(|e| {
+                let mut msg = e.to_string();
+                if let S3Auth::AccessKey { secret, .. } = auth {
+                    msg = scrub_secret(&msg, secret);
+                }
+                format!("failed to initialise S3 access (httpfs/aws extensions, credentials): {msg}")
+            })?;
             let store = DuckDbObjectStore::new(pool.clone());
             data::discovery::discover_partitions(&store, &source.s3_uri, range_start, range_end)
         }
@@ -129,6 +146,14 @@ mod tests {
 
     fn local(dir: &std::path::Path) -> DataSource {
         DataSource { id: "t".into(), name: "T".into(), s3_uri: dir.to_str().unwrap().into(), ..Default::default() }
+    }
+
+    #[test]
+    fn scrub_secret_redacts_every_occurrence() {
+        assert_eq!(scrub_secret("auth failed for TOPSECRET at TOPSECRET", "TOPSECRET"), "auth failed for *** at ***");
+        assert_eq!(scrub_secret("no secret here", "TOPSECRET"), "no secret here");
+        // Guard against an empty secret turning into a no-op match-everywhere.
+        assert_eq!(scrub_secret("unchanged", ""), "unchanged");
     }
 
     #[test]

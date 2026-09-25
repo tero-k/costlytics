@@ -23,7 +23,7 @@ pub struct SettingsResponse {
     pub sources: Vec<SourceSettings>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct SaveSourceRequest {
     pub source: DataSource,
     /// New access-key secret; `None`/empty keeps the stored one.
@@ -32,11 +32,33 @@ pub struct SaveSourceRequest {
     pub is_new: bool,
 }
 
-#[derive(Debug, Deserialize)]
+/// Manual impl (rather than `#[derive(Debug)]`) so a stray `{:?}` log/panic
+/// message never prints the raw access-key secret.
+impl std::fmt::Debug for SaveSourceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveSourceRequest")
+            .field("source", &self.source)
+            .field("secret", &self.secret.as_ref().map(|_| "***"))
+            .field("is_new", &self.is_new)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct TestSourceRequest {
     pub source: DataSource,
     #[serde(default)]
     pub secret: Option<String>,
+}
+
+/// See `SaveSourceRequest`'s manual `Debug` impl for why.
+impl std::fmt::Debug for TestSourceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestSourceRequest")
+            .field("source", &self.source)
+            .field("secret", &self.secret.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,13 +160,14 @@ impl CostlyticsService {
         Ok(())
     }
 
-    /// Blocking: (re)registers one source, updating the registry. Uses
-    /// `mark_pending`'s generation so a result made stale by a concurrent
+    /// Blocking: (re)registers one source, updating the registry, given a
+    /// generation already captured by a prior `mark_pending` (typically
+    /// while holding `mutation` — see `save_source`/`reload_source`). Uses
+    /// that generation so a result made stale by a concurrent
     /// `mark_pending`/`remove` for the same id (another save, reload, or
     /// `register_all` racing a Settings change) is discarded instead of
     /// clobbering a newer outcome — see `SourceRegistry::set_result_if_current`.
-    fn register_one(&self, source: &DataSource, secret: Option<&str>) {
-        let generation = self.registry.mark_pending(source);
+    fn register_with_generation(&self, source: &DataSource, secret: Option<&str>, generation: u64) {
         let result = register_source(source, secret);
         match &result {
             Ok(r) => tracing::info!(source_id = %source.id, file_count = r.file_count, format = %r.detected_format, "source registered"),
@@ -184,12 +207,7 @@ impl CostlyticsService {
                 S3AuthConfig::AccessKey { .. } => self.stored_secret(&source.id),
                 S3AuthConfig::CredentialChain => None,
             };
-            let result = register_source(&source, secret.as_deref());
-            match &result {
-                Ok(r) => tracing::info!(source_id = %source.id, file_count = r.file_count, format = %r.detected_format, "source registered"),
-                Err(reason) => tracing::warn!(source_id = %source.id, %reason, "source skipped"),
-            }
-            self.registry.set_result_if_current(&source.id, generation, result);
+            self.register_with_generation(&source, secret.as_deref(), generation);
         }
     }
 
@@ -262,9 +280,16 @@ impl CostlyticsService {
             return Err(e);
         }
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+        // Captured while still holding `mutation`, so a concurrent save/
+        // reload/`register_all` pass for this id can't be sandwiched
+        // between our config write-back and this `mark_pending` and have
+        // its own (older) generation look newer than a mark_pending that
+        // logically happens after it. Slow registration I/O itself still
+        // runs after the lock is released, below.
+        let generation = self.registry.mark_pending(&source);
         drop(_guard);
 
-        self.register_one(&source, secret.as_deref());
+        self.register_with_generation(&source, secret.as_deref(), generation);
         self.entry(&source.id)
     }
 
@@ -281,11 +306,11 @@ impl CostlyticsService {
         }
         self.persist(&config)?;
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
-        drop(_guard);
         if let Err(e) = self.secrets.delete(&req.id) {
             tracing::warn!(source_id = %req.id, error = %e, "could not delete secret from keychain");
         }
         self.registry.remove(&req.id);
+        drop(_guard);
         Ok(self.sources())
     }
 
@@ -303,12 +328,21 @@ impl CostlyticsService {
     }
 
     pub fn reload_source(&self, req: SourceIdRequest) -> Result<SourceEntry, ServiceError> {
-        let source = self.find(&req.id).ok_or_else(|| ServiceError::not_found(format!("unknown source '{}'", req.id)))?;
+        // Held only across the existence check and `mark_pending`, mirroring
+        // `save_source` — see its comment on `mutation` — so a concurrent
+        // save/delete/`register_all` pass for this id can't race the
+        // generation this reload captures. Released before registration I/O.
+        let (source, generation) = {
+            let _guard = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+            let source = self.find(&req.id).ok_or_else(|| ServiceError::not_found(format!("unknown source '{}'", req.id)))?;
+            let generation = self.registry.mark_pending(&source);
+            (source, generation)
+        };
         let secret = match source.auth {
             S3AuthConfig::AccessKey { .. } => self.stored_secret(&source.id),
             S3AuthConfig::CredentialChain => None,
         };
-        self.register_one(&source, secret.as_deref());
+        self.register_with_generation(&source, secret.as_deref(), generation);
         self.entry(&source.id)
     }
 }
@@ -502,15 +536,16 @@ mod tests {
 
     /// (a) `register_one` discards a stale generation's result. Simulated
     /// by re-marking the source pending (bumping its generation) between
-    /// two calls to `register_one` for the same id, mirroring what a
-    /// concurrent reload/save would do to a slower `register_all` pass.
+    /// two calls to `register_with_generation` for the same id, mirroring
+    /// what a concurrent reload/save would do to a slower `register_all` pass.
     #[test]
-    fn register_one_ignores_a_result_made_stale_by_a_concurrent_mark_pending() {
+    fn register_with_generation_ignores_a_result_made_stale_by_a_concurrent_mark_pending() {
         let f = fixture();
         let source = local("a", &f.fixture_path);
 
         // First registration.
-        f.svc.register_one(&source, None);
+        let first_generation = f.svc.registry.mark_pending(&source);
+        f.svc.register_with_generation(&source, None, first_generation);
         assert!(matches!(
             f.svc.registry.diagnostics()[0].status,
             crate::registry::SourceStatus::Registered { .. }
@@ -521,12 +556,13 @@ mod tests {
         f.svc.registry.mark_pending(&source);
         assert_eq!(f.svc.registry.diagnostics()[0].status, crate::registry::SourceStatus::Pending);
 
-        // `register_one`'s own generation (captured before this point) is
-        // now stale; applying it must not clobber the newer `Pending` state
-        // with an outcome computed for the superseded generation.
+        // `register_with_generation`'s own generation (captured before this
+        // point) is now stale; applying it must not clobber the newer
+        // `Pending` state with an outcome computed for the superseded
+        // generation.
         f.svc.registry.set_result_if_current(
             "a",
-            0, // the first call's generation
+            first_generation,
             Err("stale result from the first registration".into()),
         );
         assert_eq!(

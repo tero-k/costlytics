@@ -103,9 +103,17 @@ impl AppConfig {
     }
 
     /// Write this config as TOML to `path` (used by the desktop Settings tab).
+    ///
+    /// Writes to a sibling `.toml.tmp` file first, then renames it over
+    /// `path`, so a crash or power loss mid-write can never leave `path`
+    /// truncated or half-written — the rename is atomic on both POSIX and
+    /// Windows (on Windows, `rename` replaces an existing destination file
+    /// rather than failing, matching POSIX `rename(2)`'s behavior here).
     pub fn save(&self, path: &std::path::Path) -> Result<(), ConfigError> {
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(path, text)?;
+        let tmp_path = path.with_extension("toml.tmp");
+        std::fs::write(&tmp_path, text)?;
+        std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
 }

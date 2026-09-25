@@ -38,6 +38,15 @@ struct Inner {
     /// In configured order; `default_source_id` is the first entry.
     diagnostics: Vec<SourceDiagnostic>,
     repos: HashMap<String, Arc<dyn CostRepository>>,
+    /// Registry-wide monotonically increasing counter; every
+    /// [`SourceRegistry::mark_pending`] call draws its generation from here
+    /// and increments it. Because generations are drawn from one shared
+    /// counter (not per-id), they never repeat across ids or across a
+    /// `remove` + re-`mark_pending` of the same id — unlike a per-id counter,
+    /// which resets to 0 for an id it no longer knows about (see
+    /// `mark_pending`'s old behavior), letting a stale in-flight result from
+    /// before the removal collide with a fresh generation after re-adding.
+    next_generation: u64,
 }
 
 /// Runtime-mutable set of sources. Registration I/O happens *outside* the
@@ -71,10 +80,8 @@ impl SourceRegistry {
     pub fn mark_pending(&self, source: &DataSource) -> u64 {
         let mut inner = self.write();
         inner.repos.remove(&source.id);
-        let generation = match inner.diagnostics.iter().find(|d| d.id == source.id) {
-            Some(existing) => existing.generation + 1,
-            None => 0,
-        };
+        let generation = inner.next_generation;
+        inner.next_generation += 1;
         let diag = SourceDiagnostic {
             id: source.id.clone(),
             name: source.name.clone(),
@@ -244,6 +251,30 @@ mod tests {
         reg.set_result_if_current("a", gen0, Ok(registered()));
         assert!(reg.diagnostics().is_empty());
         assert!(reg.repo(Some("a")).is_err());
+    }
+
+    /// A generation counter that were per-id (rather than registry-wide)
+    /// would reset to 0 after `remove`, letting a stale in-flight result
+    /// from before the removal collide with the fresh generation issued
+    /// after re-adding the same id. The registry-wide counter (this test)
+    /// guarantees generations never repeat, even across a remove/re-add.
+    #[test]
+    fn generation_after_remove_and_re_add_never_collides_with_a_stale_one() {
+        let reg = SourceRegistry::new();
+        let gen1 = reg.mark_pending(&source("a"));
+        reg.remove("a");
+        let gen2 = reg.mark_pending(&source("a"));
+        assert_ne!(gen1, gen2);
+
+        // The stale gen1 result (from before the remove) must be ignored,
+        // leaving the re-added "a" still Pending.
+        reg.set_result_if_current("a", gen1, Ok(registered()));
+        assert_eq!(reg.diagnostics()[0].status, SourceStatus::Pending);
+        assert!(reg.repo(Some("a")).is_err());
+
+        // The current (gen2) result still applies normally.
+        reg.set_result_if_current("a", gen2, Ok(registered()));
+        assert!(matches!(reg.diagnostics()[0].status, SourceStatus::Registered { .. }));
     }
 
     #[test]
