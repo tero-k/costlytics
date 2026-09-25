@@ -74,21 +74,12 @@ impl DataSource {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
     pub sources: Vec<DataSource>,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            sources: Vec::new(),
-        }
-    }
 }
 
 impl AppConfig {
