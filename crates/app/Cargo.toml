@@ -1,0 +1,24 @@
+[package]
+name = "costlytics-app"
+version = "0.1.0"
+edition = "2021"
+description = "Costlytics desktop app"
+
+[[bin]]
+name = "costlytics"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+service = { path = "../service" }
+data = { path = "../data" }
+domain = { path = "../domain" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

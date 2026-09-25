@@ -5,7 +5,11 @@ members = [
     "crates/data",
     "crates/api",
     "crates/service",
+    "crates/app",
 ]
+# `cargo test`/`cargo build` at the root skip the Tauri app (slow, needs
+# WebView toolchains); use `cargo test --workspace` or `cargo tauri dev`.
+default-members = ["crates/domain", "crates/data", "crates/service", "crates/api"]
 
 [workspace.dependencies]
 # filled in by later tasks
