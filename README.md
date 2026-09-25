@@ -77,11 +77,11 @@ Every configured `[[sources]]` entry is either registered successfully at
 startup or silently skipped (logged via `tracing::warn!`/`tracing::error!`) —
 `GET /api/v1/sources` makes that visible over HTTP as the harness's mirror of
 the Settings page's status: it returns every configured source's id, name,
-configured type, and either
-`{"state": "registered", "detected_format", "file_count"}` or
-`{"state": "skipped", "reason"}`, plus `default_source_id`, the source id
-that requests without an explicit `source_id` fall back to (the first
-configured source).
+configured type, and one of `{"state": "pending"}` (registration is still in
+progress — startup, a save or a reload), `{"state": "registered",
+"detected_format", "file_count"}`, or `{"state": "skipped", "reason"}`, plus
+`default_source_id`, the source id that requests without an explicit
+`source_id` fall back to (the first configured source).
 
 The full startup pipeline (partition discovery -> schema detection -> view
 registration -> HTTP query) is exercised end-to-end, against a generated
