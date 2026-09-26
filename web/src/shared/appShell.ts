@@ -24,6 +24,8 @@
 import { initSharedControls } from './appState.ts';
 import { DATE_PRESETS, matchingPresets, presetRange, type PresetId } from './datePresets.ts';
 import { initStatusBar } from './statusBar.ts';
+import { escapeHtml } from './html.ts';
+import { appVersionLabel } from './version.ts';
 
 interface NavItem {
   page: string;
@@ -91,9 +93,11 @@ function renderSidebar(activePage: string): HTMLElement {
     const heading = group.label ? `<div class="nav-group-label">${group.label}</div>` : '';
     return `<div class="nav-group${group.label ? '' : ' nav-group-bottom'}">${heading}${links}</div>`;
   }).join('');
+  const version = appVersionLabel();
   aside.innerHTML = `
     <a class="brand" href="/">${svgIcon(ICONS.logo)}<span>Costlytics</span></a>
-    <nav class="app-nav" aria-label="Main">${groups}</nav>`;
+    <nav class="app-nav" aria-label="Main">${groups}</nav>
+    <div class="app-version" title="${escapeHtml(version.tooltip)}">${escapeHtml(version.label)}</div>`;
   return aside;
 }
 

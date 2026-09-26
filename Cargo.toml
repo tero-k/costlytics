@@ -11,5 +11,11 @@ members = [
 # WebView toolchains); use `cargo test --workspace` or `cargo tauri dev`.
 default-members = ["crates/domain", "crates/data", "crates/service", "crates/api"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/tero-k/costlytics"
+
 [workspace.dependencies]
 # filled in by later tasks

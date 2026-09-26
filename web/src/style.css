@@ -126,6 +126,14 @@ body {
   margin-top: auto;
 }
 
+.app-version {
+  padding: 0 0.6rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
 .nav-group-label {
   padding: 0 0.6rem 0.3rem;
   font-size: 0.7rem;
@@ -992,6 +1000,10 @@ main > [hidden],
 
   .nav-group-bottom {
     margin-top: 0;
+  }
+
+  .app-version {
+    white-space: nowrap;
   }
 
   .app-nav a {

@@ -1,11 +1,37 @@
+import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
 const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
+// The Cargo workspace version is the single source of truth for the app
+// version (see README "Releasing"); `package.json`'s version is unused.
+function cargoWorkspaceVersion(): string {
+  const toml = readFileSync(resolve(rootDir, '../Cargo.toml'), 'utf8');
+  const section = toml.split(/^\[workspace\.package\]\s*$/m)[1]?.split(/^\[/m)[0] ?? '';
+  const match = section.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!match) throw new Error('version not found in [workspace.package] of ../Cargo.toml');
+  return match[1];
+}
+
+function gitDescribe(): string {
+  try {
+    return execSync('git describe --tags --always --dirty', { cwd: rootDir, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(cargoWorkspaceVersion()),
+    __APP_BUILD__: JSON.stringify(gitDescribe()),
+  },
   server: {
     proxy: {
       // Same-origin proxy to the Axum backend during `npm run dev`, so

@@ -53,6 +53,8 @@ for (const { path, activeHref, title } of PAGES) {
     await expect(active).toHaveCount(1);
     await expect(active).toHaveAttribute('href', activeHref);
 
+    await expect(page.locator('.sidebar .app-version')).toHaveText(/^v\d+\.\d+\.\d+/);
+
     expect(consoleErrors, `console errors on ${path}: ${consoleErrors.join('\n')}`).toEqual([]);
     expect(pageErrors, `uncaught page errors on ${path}: ${pageErrors.join('\n')}`).toEqual([]);
 
