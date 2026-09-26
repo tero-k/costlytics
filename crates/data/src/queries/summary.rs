@@ -2,10 +2,12 @@ use crate::queries::predicate::{build_predicate, FilterPredicate};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use domain::cost::{
     BreakdownResult, BreakdownRow, CompareResult, CompareRow, CostSummary, TimeSeriesPoint,
-    TimeSeriesResult, COL_ACCOUNT_ID, COL_REGION, COL_SERVICE_NAME, COL_TAGS,
+    TimeSeriesResult, COL_ACCOUNT_ID, COL_REGION, COL_RESOURCE_ID, COL_SERVICE_NAME, COL_TAGS,
 };
 use domain::dimensions::Dimension;
 use domain::filters::CostFilter;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use thiserror::Error;
 
 /// Safety cap on the number of points a single `timeseries()` call may
@@ -18,7 +20,8 @@ const MAX_TIMESERIES_POINTS: usize = 10_000;
 
 /// Safety cap on the number of distinct values returned by the
 /// `distinct_*` filter-value lookup methods (used to populate dropdown
-/// filters in the UI). These queries are not scoped to a date range, so an
+/// filters in the UI; results are cached per repository, see
+/// `DuckDbCostRepository::filter_values`). These queries are not scoped to a date range, so an
 /// unbounded dataset with high-cardinality columns (e.g. resource IDs
 /// masquerading as tag values) could otherwise return an unbounded result.
 const MAX_FILTER_VALUES: usize = 1000;
@@ -86,15 +89,52 @@ pub trait CostRepository: Send + Sync {
     /// Distinct, sorted tag values for a single tag key across the whole
     /// dataset.
     fn distinct_tag_values(&self, key: &str) -> Result<Vec<String>, QueryError>;
+
+    /// Resource IDs containing `needle` (case-insensitive) within the
+    /// filter's date range and predicates, most expensive first (by the
+    /// filter's metric). Date-scoped, unlike the `distinct_*` lookups, so a
+    /// search only reads the partitions the page is already looking at.
+    fn search_resources(
+        &self,
+        filter: &CostFilter,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, QueryError>;
 }
 
 pub struct DuckDbCostRepository {
     pool: crate::duckdb_pool::DbPool,
+    /// Results of the `distinct_*` lookups, keyed by lookup. Those queries
+    /// are not date-scoped, so each one scans the whole registered dataset;
+    /// the view's file list is fixed for the repository's lifetime (a source
+    /// is re-registered into a new repository to pick up new files), so the
+    /// first successful result is reused.
+    filter_values: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl DuckDbCostRepository {
     pub fn new(pool: crate::duckdb_pool::DbPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            filter_values: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Return the cached result for `key`, or run `query` and cache it if it
+    /// succeeds. Errors are not cached. Two concurrent first calls may both
+    /// run `query`; either result is equally valid.
+    fn cached_filter_values(
+        &self,
+        key: String,
+        query: impl FnOnce() -> Result<Vec<String>, QueryError>,
+    ) -> Result<Vec<String>, QueryError> {
+        let lock = || self.filter_values.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(values) = lock().get(&key) {
+            return Ok(values.clone());
+        }
+        let values = query()?;
+        lock().insert(key, values.clone());
+        Ok(values)
     }
 }
 
@@ -320,6 +360,44 @@ impl CostRepository for DuckDbCostRepository {
         Ok(BreakdownResult { currency, rows })
     }
 
+    fn search_resources(
+        &self,
+        filter: &CostFilter,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, QueryError> {
+        let conn = self.pool.get()?;
+
+        let metric_col = filter.metric.column_name();
+        let start_str = filter.start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let end_str = filter.end.format("%Y-%m-%d %H:%M:%S").to_string();
+        let predicate = build_predicate(filter);
+
+        let sql = format!(
+            "SELECT {res} FROM normalized_cost \
+             WHERE usage_start >= CAST(? AS TIMESTAMP) AND usage_start < CAST(? AS TIMESTAMP) \
+             AND {res} IS NOT NULL AND contains(lower({res}), lower(?)){predicate_sql} \
+             GROUP BY {res} \
+             ORDER BY SUM({metric}) DESC, {res} \
+             LIMIT ?",
+            res = COL_RESOURCE_ID,
+            metric = metric_col,
+            predicate_sql = predicate.sql
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let limit_val = limit as i64;
+        let needle = needle.to_string();
+        let mut params: Vec<&dyn duckdb::ToSql> = vec![&start_str, &end_str, &needle];
+        params.extend(predicate.params.iter().map(|p| p as &dyn duckdb::ToSql));
+        params.push(&limit_val);
+        let ids: Vec<String> = stmt
+            .query_map(duckdb::params_from_iter(params), |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        Ok(ids)
+    }
+
     fn compare(
         &self,
         current: &CostFilter,
@@ -491,48 +569,52 @@ impl CostRepository for DuckDbCostRepository {
     }
 
     fn distinct_tag_keys(&self) -> Result<Vec<String>, QueryError> {
-        let conn = self.pool.get()?;
+        self.cached_filter_values("tag_keys".to_string(), || {
+            let conn = self.pool.get()?;
 
-        let sql = format!(
-            "SELECT DISTINCT k FROM ( \
-                SELECT UNNEST(map_keys({tags})) AS k \
-                FROM normalized_cost WHERE {tags} IS NOT NULL \
-             ) \
-             ORDER BY k \
-             LIMIT ?",
-            tags = COL_TAGS
-        );
+            let sql = format!(
+                "SELECT DISTINCT k FROM ( \
+                    SELECT UNNEST(map_keys({tags})) AS k \
+                    FROM normalized_cost WHERE {tags} IS NOT NULL \
+                 ) \
+                 ORDER BY k \
+                 LIMIT ?",
+                tags = COL_TAGS
+            );
 
-        let mut stmt = conn.prepare(&sql)?;
-        let keys: Vec<String> = stmt
-            .query_map(duckdb::params![MAX_FILTER_VALUES as i64], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
+            let mut stmt = conn.prepare(&sql)?;
+            let keys: Vec<String> = stmt
+                .query_map(duckdb::params![MAX_FILTER_VALUES as i64], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
 
-        Ok(keys)
+            Ok(keys)
+        })
     }
 
     fn distinct_tag_values(&self, key: &str) -> Result<Vec<String>, QueryError> {
-        let conn = self.pool.get()?;
+        self.cached_filter_values(format!("tag_values:{key}"), || {
+            let conn = self.pool.get()?;
 
-        let sql = format!(
-            "SELECT DISTINCT v FROM ( \
-                SELECT UNNEST(map_keys({tags})) AS k, UNNEST(map_values({tags})) AS v \
-                FROM normalized_cost WHERE {tags} IS NOT NULL \
-             ) \
-             WHERE k = ? \
-             ORDER BY v \
-             LIMIT ?",
-            tags = COL_TAGS
-        );
+            let sql = format!(
+                "SELECT DISTINCT v FROM ( \
+                    SELECT UNNEST(map_keys({tags})) AS k, UNNEST(map_values({tags})) AS v \
+                    FROM normalized_cost WHERE {tags} IS NOT NULL \
+                 ) \
+                 WHERE k = ? \
+                 ORDER BY v \
+                 LIMIT ?",
+                tags = COL_TAGS
+            );
 
-        let mut stmt = conn.prepare(&sql)?;
-        let values: Vec<String> = stmt
-            .query_map(duckdb::params![key, MAX_FILTER_VALUES as i64], |row| {
-                row.get(0)
-            })?
-            .collect::<Result<_, _>>()?;
+            let mut stmt = conn.prepare(&sql)?;
+            let values: Vec<String> = stmt
+                .query_map(duckdb::params![key, MAX_FILTER_VALUES as i64], |row| {
+                    row.get(0)
+                })?
+                .collect::<Result<_, _>>()?;
 
-        Ok(values)
+            Ok(values)
+        })
     }
 }
 
@@ -541,22 +623,24 @@ impl DuckDbCostRepository {
     /// `distinct_regions`: distinct, sorted, non-null values of a single
     /// column across the whole dataset, capped at `MAX_FILTER_VALUES`.
     fn distinct_column_values(&self, column: &str) -> Result<Vec<String>, QueryError> {
-        let conn = self.pool.get()?;
+        self.cached_filter_values(format!("column:{column}"), || {
+            let conn = self.pool.get()?;
 
-        let sql = format!(
-            "SELECT DISTINCT {column} FROM normalized_cost \
-             WHERE {column} IS NOT NULL \
-             ORDER BY {column} \
-             LIMIT ?",
-            column = column
-        );
+            let sql = format!(
+                "SELECT DISTINCT {column} FROM normalized_cost \
+                 WHERE {column} IS NOT NULL \
+                 ORDER BY {column} \
+                 LIMIT ?",
+                column = column
+            );
 
-        let mut stmt = conn.prepare(&sql)?;
-        let values: Vec<String> = stmt
-            .query_map(duckdb::params![MAX_FILTER_VALUES as i64], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
+            let mut stmt = conn.prepare(&sql)?;
+            let values: Vec<String> = stmt
+                .query_map(duckdb::params![MAX_FILTER_VALUES as i64], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
 
-        Ok(values)
+            Ok(values)
+        })
     }
 }
 
@@ -1216,6 +1300,53 @@ mod tests {
         assert!(missing.is_empty());
     }
 
+    /// Filter values scan the whole registered dataset (every file, every
+    /// row), so they are computed once per repository — a registered source's
+    /// file list is fixed — and later calls must not touch the Parquet files.
+    /// Removing the file after the first calls proves the second calls are
+    /// served without re-reading it.
+    #[test]
+    fn distinct_values_are_scanned_once_per_repository() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(std::slice::from_ref(&path));
+        let repo = DuckDbCostRepository::new(pool);
+
+        let services = repo.distinct_services().unwrap();
+        let accounts = repo.distinct_accounts().unwrap();
+        let regions = repo.distinct_regions().unwrap();
+        let keys = repo.distinct_tag_keys().unwrap();
+        let env_values = repo.distinct_tag_values("Environment").unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(repo.distinct_services().unwrap(), services);
+        assert_eq!(repo.distinct_accounts().unwrap(), accounts);
+        assert_eq!(repo.distinct_regions().unwrap(), regions);
+        assert_eq!(repo.distinct_tag_keys().unwrap(), keys);
+        assert_eq!(repo.distinct_tag_values("Environment").unwrap(), env_values);
+        // A key not asked for before still needs a scan, which now fails.
+        assert!(repo.distinct_tag_values("Team").is_err());
+    }
+
+    /// A failed lookup must not be cached: once the data is readable again,
+    /// the next call scans and succeeds.
+    #[test]
+    fn distinct_values_errors_are_not_cached() {
+        let (_dir, path) = write_parquet(TAGGED_SELECT);
+        let pool = build_test_pool(std::slice::from_ref(&path));
+        let repo = DuckDbCostRepository::new(pool);
+
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(repo.distinct_services().is_err());
+
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            repo.distinct_services().unwrap(),
+            vec!["EC2".to_string(), "S3".to_string()]
+        );
+    }
+
     // -----------------------------------------------------------------------
     // compare() tests
     // -----------------------------------------------------------------------
@@ -1642,6 +1773,44 @@ mod tests {
         let services = repo.distinct_services().unwrap();
         assert!(services.len() <= MAX_FILTER_VALUES);
         assert_eq!(services.len(), 2);
+    }
+
+    fn august_filter() -> CostFilter {
+        CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        )
+    }
+
+    #[test]
+    fn search_resources_matches_substring_case_insensitively_by_cost() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let repo = DuckDbCostRepository::new(build_test_pool(&[path]));
+
+        // i-abc123 (EC2, 1034.56 amortized) outranks bucket-abc (S3, 200.00).
+        let ids = repo.search_resources(&august_filter(), "ABC", 10).unwrap();
+        assert_eq!(ids, vec!["i-abc123".to_string(), "bucket-abc".to_string()]);
+
+        let ids = repo.search_resources(&august_filter(), "bucket", 10).unwrap();
+        assert_eq!(ids, vec!["bucket-abc".to_string()]);
+    }
+
+    #[test]
+    fn search_resources_applies_predicates_limit_and_date_range() {
+        let (_dir, path) = write_parquet(INLINE_SELECT);
+        let repo = DuckDbCostRepository::new(build_test_pool(&[path]));
+
+        let mut s3_only = august_filter();
+        s3_only.services = vec!["S3".to_string()];
+        assert_eq!(repo.search_resources(&s3_only, "abc", 10).unwrap(), vec!["bucket-abc".to_string()]);
+
+        assert_eq!(repo.search_resources(&august_filter(), "abc", 1).unwrap(), vec!["i-abc123".to_string()]);
+
+        let july = CostFilter::date_range(
+            Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+        );
+        assert!(repo.search_resources(&july, "abc", 10).unwrap().is_empty());
     }
 
     // -----------------------------------------------------------------------

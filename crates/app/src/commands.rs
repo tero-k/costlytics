@@ -8,9 +8,11 @@ use serde::Serialize;
 use service::app::{
     SaveSourceRequest, SettingsResponse, SourceIdRequest, TestSourceRequest, TestSourceResponse,
 };
+use data::config::CostGuardConfig;
 use service::cost::{
-    self, BreakdownRequest, BreakdownResponse, CompareRequest, CompareResponse, FilterDimension,
-    FilterValuesQuery, FilterValuesResponse, SummaryRequest, TagValuesQuery, TimeseriesRequest,
+    self, BreakdownRequest, BreakdownResponse, CompareRequest, CompareResponse, EstimateRequest,
+    EstimateResponse, FilterDimension,
+    FilterValuesQuery, FilterValuesResponse, ResourceSearchRequest, SummaryRequest, TagValuesQuery, TimeseriesRequest,
     TimeseriesResponse,
 };
 use service::sources::{SourceEntry, SourcesResponse};
@@ -50,6 +52,16 @@ pub async fn cost_breakdown(svc: Svc<'_>, req: BreakdownRequest) -> Result<Break
 #[tauri::command]
 pub async fn cost_compare(svc: Svc<'_>, req: CompareRequest) -> Result<CompareResponse, ServiceError> {
     blocking(&svc, move |s| cost::cost_compare(&s.registry, req)).await
+}
+
+#[tauri::command]
+pub async fn cost_estimate(svc: Svc<'_>, req: EstimateRequest) -> Result<EstimateResponse, ServiceError> {
+    blocking(&svc, move |s| s.cost_estimate(req)).await
+}
+
+#[tauri::command]
+pub async fn cost_resource_search(svc: Svc<'_>, req: ResourceSearchRequest) -> Result<FilterValuesResponse, ServiceError> {
+    blocking(&svc, move |s| cost::resource_search(&s.registry, req)).await
 }
 
 async fn values(svc: Svc<'_>, dim: FilterDimension, req: FilterValuesQuery) -> Result<FilterValuesResponse, ServiceError> {
@@ -109,4 +121,9 @@ pub async fn settings_source_test(svc: Svc<'_>, req: TestSourceRequest) -> Resul
 #[tauri::command]
 pub async fn settings_source_reload(svc: Svc<'_>, req: SourceIdRequest) -> Result<SourceEntry, ServiceError> {
     blocking(&svc, move |s| s.reload_source(req)).await
+}
+
+#[tauri::command]
+pub async fn settings_cost_guard_save(svc: Svc<'_>, req: CostGuardConfig) -> Result<CostGuardConfig, ServiceError> {
+    blocking(&svc, move |s| s.save_cost_guard(req)).await
 }

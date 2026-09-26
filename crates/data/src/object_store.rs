@@ -62,11 +62,33 @@ impl std::fmt::Display for YearMonth {
     }
 }
 
+/// One `BILLING_PERIOD=YYYY-MM` directory found under a source's base URI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingPeriodDir {
+    pub period: YearMonth,
+    /// Full URI/path of the directory, spelled as it exists in storage
+    /// (exports may write `billing_period=` in lower case).
+    pub dir_uri: String,
+}
+
+/// Parses a directory name of the form `BILLING_PERIOD=YYYY-MM`, matching the
+/// `BILLING_PERIOD=` prefix case-insensitively.
+fn parse_billing_period_dir_name(name: &str) -> Option<YearMonth> {
+    const PREFIX: &str = "BILLING_PERIOD=";
+    let prefix = name.get(..PREFIX.len())?;
+    if !prefix.eq_ignore_ascii_case(PREFIX) {
+        return None;
+    }
+    YearMonth::parse(&name[PREFIX.len()..])
+}
+
 /// Minimal abstraction over object storage (local FS or S3).
 pub trait ObjectStore: Send + Sync {
-    /// List all "directory" prefixes immediately under `prefix` that match
-    /// the `BILLING_PERIOD=YYYY-MM` pattern. Returns just the `YYYY-MM` part.
-    fn list_billing_periods(&self, base_uri: &str) -> Result<Vec<String>, ObjectStoreError>;
+    /// List the `BILLING_PERIOD=YYYY-MM` directories (prefix matched
+    /// case-insensitively) immediately under `base_uri`, sorted by period and
+    /// then path. A period may appear more than once if its directory exists
+    /// in several spellings.
+    fn list_billing_periods(&self, base_uri: &str) -> Result<Vec<BillingPeriodDir>, ObjectStoreError>;
 
     /// Read the bytes of a file (e.g. Manifest.json).
     fn read_file(&self, uri: &str) -> Result<Vec<u8>, ObjectStoreError>;
@@ -80,12 +102,13 @@ pub trait ObjectStore: Send + Sync {
 pub struct LocalObjectStore;
 
 impl ObjectStore for LocalObjectStore {
-    fn list_billing_periods(&self, base_path: &str) -> Result<Vec<String>, ObjectStoreError> {
+    fn list_billing_periods(&self, base_path: &str) -> Result<Vec<BillingPeriodDir>, ObjectStoreError> {
         let dir = std::path::Path::new(base_path);
         if !dir.exists() {
             return Ok(Vec::new());
         }
 
+        let base = base_path.trim_end_matches('/').trim_end_matches('\\');
         let mut periods = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -93,17 +116,13 @@ impl ObjectStore for LocalObjectStore {
             if !file_type.is_dir() {
                 continue;
             }
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            // Match BILLING_PERIOD=YYYY-MM
-            if let Some(ym_str) = name_str.strip_prefix("BILLING_PERIOD=") {
-                if YearMonth::parse(ym_str).is_some() {
-                    periods.push(ym_str.to_string());
-                }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(period) = parse_billing_period_dir_name(&name) {
+                periods.push(BillingPeriodDir { period, dir_uri: format!("{base}/{name}") });
             }
         }
         // Return sorted for deterministic ordering
-        periods.sort();
+        periods.sort_by(|a, b| (&a.period, &a.dir_uri).cmp(&(&b.period, &b.dir_uri)));
         Ok(periods)
     }
 
@@ -159,23 +178,21 @@ impl DuckDbObjectStore {
     }
 }
 
-/// Extract `YYYY-MM` from the `BILLING_PERIOD=YYYY-MM` path segment of `path`.
-fn billing_period_segment(path: &str) -> Option<String> {
-    path.split(['/', '\\'])
-        .find_map(|seg| seg.strip_prefix("BILLING_PERIOD="))
-        .filter(|ym| YearMonth::parse(ym).is_some())
-        .map(str::to_string)
-}
-
 impl ObjectStore for DuckDbObjectStore {
-    fn list_billing_periods(&self, base_uri: &str) -> Result<Vec<String>, ObjectStoreError> {
-        let pattern = format!("{}/BILLING_PERIOD=*/*", base_uri.trim_end_matches('/'));
-        let mut periods: Vec<String> = self
-            .glob(&pattern)?
+    fn list_billing_periods(&self, base_uri: &str) -> Result<Vec<BillingPeriodDir>, ObjectStoreError> {
+        // `glob()` patterns are case-sensitive, so list every file one level
+        // down and match the directory name ourselves.
+        let base = base_uri.trim_end_matches('/');
+        let mut periods: Vec<BillingPeriodDir> = self
+            .glob(&format!("{base}/*/*"))?
             .iter()
-            .filter_map(|f| billing_period_segment(f))
+            .filter_map(|file| {
+                let name = file.rsplit(['/', '\\']).nth(1)?;
+                let period = parse_billing_period_dir_name(name)?;
+                Some(BillingPeriodDir { period, dir_uri: format!("{base}/{name}") })
+            })
             .collect();
-        periods.sort();
+        periods.sort_by(|a, b| (&a.period, &a.dir_uri).cmp(&(&b.period, &b.dir_uri)));
         periods.dedup();
         Ok(periods)
     }
@@ -214,11 +231,56 @@ mod tests {
     fn local_store_lists_billing_periods() {
         let dir = setup_temp_store();
         let store = LocalObjectStore;
-        let mut periods = store
-            .list_billing_periods(dir.path().to_str().unwrap())
-            .unwrap();
-        periods.sort();
-        assert_eq!(periods, vec!["2026-08", "2026-09"]);
+        let base = dir.path().to_str().unwrap();
+        let periods = store.list_billing_periods(base).unwrap();
+        assert_eq!(
+            periods,
+            vec![
+                BillingPeriodDir {
+                    period: YearMonth::new(2026, 8),
+                    dir_uri: format!("{base}/BILLING_PERIOD=2026-08"),
+                },
+                BillingPeriodDir {
+                    period: YearMonth::new(2026, 9),
+                    dir_uri: format!("{base}/BILLING_PERIOD=2026-09"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn billing_period_prefix_is_case_insensitive() {
+        assert_eq!(parse_billing_period_dir_name("billing_period=2026-09"), Some(YearMonth::new(2026, 9)));
+        assert_eq!(parse_billing_period_dir_name("Billing_Period=2025-04"), Some(YearMonth::new(2025, 4)));
+        assert_eq!(parse_billing_period_dir_name("BILLING_PERIOD=2026-05"), Some(YearMonth::new(2026, 5)));
+        assert_eq!(parse_billing_period_dir_name("billing_period=bogus"), None);
+        assert_eq!(parse_billing_period_dir_name("period=2026-09"), None);
+        assert_eq!(parse_billing_period_dir_name("é"), None);
+    }
+
+    #[test]
+    fn local_store_lists_lowercase_dirs_with_their_real_spelling() {
+        let dir = TempDir::new().unwrap();
+        // Mixed spellings of *different* months: two spellings of the same
+        // month can coexist on S3 but not on a case-insensitive local disk.
+        fs::create_dir(dir.path().join("billing_period=2026-09")).unwrap();
+        fs::create_dir(dir.path().join("BILLING_PERIOD=2026-05")).unwrap();
+        let base = dir.path().to_str().unwrap();
+
+        let dirs: Vec<(String, String)> = LocalObjectStore
+            .list_billing_periods(base)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.period.to_ym_string(), d.dir_uri))
+            .collect();
+
+        assert_eq!(
+            dirs,
+            vec![
+                ("2026-05".into(), format!("{base}/BILLING_PERIOD=2026-05")),
+                ("2026-09".into(), format!("{base}/billing_period=2026-09")),
+            ]
+        );
     }
 
     #[test]
@@ -323,7 +385,13 @@ mod tests {
         let base = dir.path().to_str().unwrap().replace('\\', "/");
         let store = DuckDbObjectStore::new(crate::duckdb_pool::build_pool().unwrap());
 
-        assert_eq!(store.list_billing_periods(&base).unwrap(), vec!["2026-08"]);
+        assert_eq!(
+            store.list_billing_periods(&base).unwrap(),
+            vec![BillingPeriodDir {
+                period: YearMonth::new(2026, 8),
+                dir_uri: format!("{base}/BILLING_PERIOD=2026-08"),
+            }]
+        );
         assert_eq!(
             store.read_file(&format!("{base}/BILLING_PERIOD=2026-08/Manifest.json")).unwrap(),
             b"{\"dataFiles\":[]}"
@@ -332,5 +400,32 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("part-1.parquet"));
         assert!(store.read_file(&format!("{base}/missing.json")).is_err());
+    }
+
+    /// The S3 path: exports that write `billing_period=` in lower case.
+    #[test]
+    fn duckdb_store_lists_lowercase_billing_period_dirs() {
+        let dir = TempDir::new().unwrap();
+        for name in ["billing_period=2026-08", "billing_period=2026-09"] {
+            let pd = dir.path().join(name);
+            fs::create_dir(&pd).unwrap();
+            fs::write(pd.join("part-1.parquet"), b"x").unwrap();
+        }
+        let base = dir.path().to_str().unwrap().replace('\\', "/");
+        let store = DuckDbObjectStore::new(crate::duckdb_pool::build_pool().unwrap());
+
+        assert_eq!(
+            store.list_billing_periods(&base).unwrap(),
+            vec![
+                BillingPeriodDir {
+                    period: YearMonth::new(2026, 8),
+                    dir_uri: format!("{base}/billing_period=2026-08"),
+                },
+                BillingPeriodDir {
+                    period: YearMonth::new(2026, 9),
+                    dir_uri: format!("{base}/billing_period=2026-09"),
+                },
+            ]
+        );
     }
 }

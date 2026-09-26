@@ -18,6 +18,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/cost/timeseries", post(handlers::cost_timeseries))
         .route("/api/v1/cost/breakdown", post(handlers::cost_breakdown))
         .route("/api/v1/cost/compare", post(handlers::cost_compare))
+        .route("/api/v1/cost/estimate", post(handlers::cost_estimate))
+        .route("/api/v1/cost/resource-search", post(handlers::cost_resource_search))
         .route(
             "/api/v1/filter-values/services",
             get(handlers::filter_values_services),
@@ -43,6 +45,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/settings/source-delete", post(handlers::settings_source_delete))
         .route("/api/v1/settings/source-test", post(handlers::settings_source_test))
         .route("/api/v1/settings/source-reload", post(handlers::settings_source_reload))
+        .route("/api/v1/settings/cost-guard-save", post(handlers::settings_cost_guard_save))
         .with_state(state);
 
     // Security headers via tower-http

@@ -58,6 +58,8 @@ fn main() {
             commands::cost_timeseries,
             commands::cost_breakdown,
             commands::cost_compare,
+            commands::cost_estimate,
+            commands::cost_resource_search,
             commands::filter_values_services,
             commands::filter_values_accounts,
             commands::filter_values_regions,
@@ -69,6 +71,7 @@ fn main() {
             commands::settings_source_delete,
             commands::settings_source_test,
             commands::settings_source_reload,
+            commands::settings_cost_guard_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Costlytics");

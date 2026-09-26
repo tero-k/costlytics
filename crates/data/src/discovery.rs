@@ -49,12 +49,14 @@ pub fn partitions_for_range(start: NaiveDate, end_exclusive: NaiveDate) -> Vec<Y
 
 /// Discover all partitions covering the given date range.
 ///
-/// Lists the `BILLING_PERIOD=YYYY-MM` directories under `base_uri` once, keeps
-/// those overlapping `[start, end_exclusive)`, and for each reads
-/// `{base_uri}/BILLING_PERIOD={YYYY-MM}/Manifest.json`. If a period has no
-/// manifest (AWS Data Exports keep manifests under a separate `metadata/`
-/// prefix, so a `data/` folder has none), the period directory's `*.parquet`
-/// files are used directly. Periods with neither are skipped with a warning.
+/// Lists the `BILLING_PERIOD=YYYY-MM` directories under `base_uri` once (the
+/// prefix matched case-insensitively, so `billing_period=` works too), keeps
+/// those overlapping `[start, end_exclusive)`, and for each reads its
+/// `Manifest.json`. If a period has no manifest (AWS Data Exports keep
+/// manifests under a separate `metadata/` prefix, so a `data/` folder has
+/// none), the period directory's `*.parquet` files are used directly.
+/// Periods with neither are skipped with a warning. A period whose directory
+/// exists in several spellings is read from all of them, with a warning.
 pub fn discover_partitions(
     store: &dyn ObjectStore,
     base_uri: &str,
@@ -62,23 +64,28 @@ pub fn discover_partitions(
     end_exclusive: NaiveDate,
 ) -> Result<Vec<DatasetPartition>, DiscoveryError> {
     let wanted = partitions_for_range(start, end_exclusive);
+    let dirs: Vec<_> = store
+        .list_billing_periods(base_uri)?
+        .into_iter()
+        .filter(|d| wanted.contains(&d.period))
+        .collect();
     let mut partitions = Vec::new();
 
-    for ym in store.list_billing_periods(base_uri)? {
-        let Some(period) = YearMonth::parse(&ym) else { continue };
-        if !wanted.contains(&period) {
-            continue;
+    for (i, dir) in dirs.iter().enumerate() {
+        let period = dir.period.clone();
+        if i > 0 && dirs[i - 1].period == period {
+            tracing::warn!(
+                period = %period,
+                dirs = %format!("{}, {}", dirs[i - 1].dir_uri, dir.dir_uri),
+                "billing period has more than one directory; reading all of them, so costs may be double-counted if they hold the same data"
+            );
         }
-        let partition_dir = format!(
-            "{}/BILLING_PERIOD={}",
-            base_uri.trim_end_matches('/'),
-            period.to_ym_string()
-        );
+        let partition_dir = dir.dir_uri.as_str();
         let manifest_uri = format!("{}/Manifest.json", partition_dir);
 
         match store.read_file(&manifest_uri) {
             Ok(content) => {
-                match parse_manifest(period.clone(), &manifest_uri, &content, &partition_dir) {
+                match parse_manifest(period.clone(), &manifest_uri, &content, partition_dir) {
                     Ok(partition) => partitions.push(partition),
                     Err(e) => {
                         tracing::warn!(
@@ -91,7 +98,7 @@ pub fn discover_partitions(
                 }
             }
             Err(_) => {
-                let files = store.list_files(&partition_dir, "parquet")?;
+                let files = store.list_files(partition_dir, "parquet")?;
                 if files.is_empty() {
                     tracing::warn!(
                         period = %period,
@@ -316,5 +323,45 @@ mod tests {
         let partitions = discover_partitions(&LocalObjectStore, &base, start, end).unwrap();
         assert_eq!(partitions.len(), 1);
         assert_eq!(partitions[0].billing_period, YearMonth::new(2026, 8));
+    }
+
+    /// S3 (unlike a local Windows disk) can hold `billing_period=2026-05` and
+    /// `BILLING_PERIOD=2026-05` side by side; files are read from each
+    /// directory's real path, and neither directory is dropped.
+    #[test]
+    fn discover_partitions_reads_every_spelling_of_a_period_from_its_real_path() {
+        use crate::object_store::{BillingPeriodDir, ObjectStoreError};
+
+        struct TwoSpellings;
+        impl ObjectStore for TwoSpellings {
+            fn list_billing_periods(&self, base: &str) -> Result<Vec<BillingPeriodDir>, ObjectStoreError> {
+                Ok(["BILLING_PERIOD=2026-05", "billing_period=2026-05"]
+                    .iter()
+                    .map(|name| BillingPeriodDir {
+                        period: YearMonth::new(2026, 5),
+                        dir_uri: format!("{base}/{name}"),
+                    })
+                    .collect())
+            }
+            fn read_file(&self, uri: &str) -> Result<Vec<u8>, ObjectStoreError> {
+                Err(ObjectStoreError::InvalidPath(uri.to_string()))
+            }
+            fn list_files(&self, dir: &str, ext: &str) -> Result<Vec<String>, ObjectStoreError> {
+                Ok(vec![format!("{dir}/part-1.{ext}")])
+            }
+        }
+
+        let start = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let partitions = discover_partitions(&TwoSpellings, "s3://b/data", start, end).unwrap();
+
+        let files: Vec<&str> = partitions.iter().flat_map(|p| p.files.iter().map(String::as_str)).collect();
+        assert_eq!(
+            files,
+            [
+                "s3://b/data/BILLING_PERIOD=2026-05/part-1.parquet",
+                "s3://b/data/billing_period=2026-05/part-1.parquet",
+            ]
+        );
     }
 }

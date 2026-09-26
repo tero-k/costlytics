@@ -80,6 +80,35 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub sources: Vec<DataSource>,
+    #[serde(default)]
+    pub cost_guard: CostGuardConfig,
+}
+
+/// Warns before a date range pulls an expensive amount of data from S3.
+/// Limits are per page load; rates default to S3 internet egress and
+/// Standard-tier GET pricing (us-east-1) and ignore the free allowance.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CostGuardConfig {
+    pub enabled: bool,
+    /// Above this, the page loads and shows a warning banner.
+    pub soft_limit_usd: f64,
+    /// Above this, the page asks for confirmation before loading.
+    pub hard_limit_usd: f64,
+    pub egress_usd_per_gb: f64,
+    pub get_usd_per_1000: f64,
+}
+
+impl Default for CostGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            soft_limit_usd: 0.10,
+            hard_limit_usd: 1.00,
+            egress_usd_per_gb: 0.09,
+            get_usd_per_1000: 0.0004,
+        }
+    }
 }
 
 impl AppConfig {
@@ -236,6 +265,7 @@ s3_uri = "s3://b/p/"
         let path = dir.path().join("settings.toml");
         let cfg = AppConfig {
             server: ServerConfig::default(),
+            cost_guard: Default::default(),
             sources: vec![DataSource {
                 id: "prod".into(),
                 name: "Prod".into(),

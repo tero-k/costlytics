@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-use data::config::{AppConfig, DataSource, S3AuthConfig};
+use data::config::{AppConfig, CostGuardConfig, DataSource, S3AuthConfig};
 use serde::{Deserialize, Serialize};
 
+use crate::cost::{self, EstimateRequest, EstimateResponse};
 use crate::error::ServiceError;
 use crate::register::register_source;
 use crate::registry::SourceRegistry;
@@ -21,6 +22,7 @@ pub struct SourceSettings {
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsResponse {
     pub sources: Vec<SourceSettings>,
+    pub cost_guard: CostGuardConfig,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +88,9 @@ pub struct CostlyticsService {
     /// each other's change. Held only across the read-check-persist-write
     /// section, never across registration I/O (see below).
     mutation: Mutex<()>,
+    /// Dev/test harness only: estimate local sources as if they were S3, so
+    /// the cost-warning flow can be exercised against local fixtures.
+    treat_local_as_remote: bool,
 }
 
 fn validate_source(s: &DataSource) -> Result<(), ServiceError> {
@@ -120,7 +125,20 @@ impl CostlyticsService {
         for source in &config.sources {
             registry.mark_pending(source);
         }
-        Self { registry, config: RwLock::new(config), settings_path, secrets, mutation: Mutex::new(()) }
+        Self {
+            registry,
+            config: RwLock::new(config),
+            settings_path,
+            secrets,
+            mutation: Mutex::new(()),
+            treat_local_as_remote: false,
+        }
+    }
+
+    /// See the `treat_local_as_remote` field. Never set by the desktop app.
+    pub fn with_local_treated_as_remote(mut self, on: bool) -> Self {
+        self.treat_local_as_remote = on;
+        self
     }
 
     fn config(&self) -> AppConfig {
@@ -226,7 +244,36 @@ impl CostlyticsService {
                 SourceSettings { source, has_secret }
             })
             .collect();
-        SettingsResponse { sources }
+        SettingsResponse { sources, cost_guard: self.config().cost_guard }
+    }
+
+    pub fn cost_estimate(&self, req: EstimateRequest) -> Result<EstimateResponse, ServiceError> {
+        let guard = self.config().cost_guard;
+        cost::cost_estimate(&self.registry, &guard, self.treat_local_as_remote, req)
+    }
+
+    pub fn save_cost_guard(&self, guard: CostGuardConfig) -> Result<CostGuardConfig, ServiceError> {
+        let values = [
+            ("soft_limit_usd", guard.soft_limit_usd),
+            ("hard_limit_usd", guard.hard_limit_usd),
+            ("egress_usd_per_gb", guard.egress_usd_per_gb),
+            ("get_usd_per_1000", guard.get_usd_per_1000),
+        ];
+        for (name, value) in values {
+            if !value.is_finite() || value < 0.0 {
+                return Err(ServiceError::bad_request(format!("{name} must be a non-negative number")));
+            }
+        }
+        if guard.hard_limit_usd < guard.soft_limit_usd {
+            return Err(ServiceError::bad_request("hard limit must be at least the soft limit"));
+        }
+        // See `save_source` for why the read-modify-write is serialized.
+        let _guard = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let mut config = self.config();
+        config.cost_guard = guard.clone();
+        self.persist(&config)?;
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+        Ok(guard)
     }
 
     /// Best-effort restore of a source's keychain entry to `previous` after
@@ -639,5 +686,20 @@ mod tests {
         // "a" was untouched and still gets registered normally.
         assert!(svc.registry.diagnostics().iter().any(|d| d.id == "a"
             && matches!(d.status, crate::registry::SourceStatus::Registered { .. })));
+    }
+
+    #[test]
+    fn save_cost_guard_persists_and_validates() {
+        let f = fixture();
+        let guard = CostGuardConfig { soft_limit_usd: 0.5, hard_limit_usd: 2.0, ..Default::default() };
+        f.svc.save_cost_guard(guard.clone()).unwrap();
+        assert_eq!(f.svc.settings().cost_guard, guard);
+        assert_eq!(AppConfig::load(f.settings_path.to_str().unwrap()).unwrap().cost_guard, guard);
+
+        let inverted = CostGuardConfig { soft_limit_usd: 3.0, hard_limit_usd: 1.0, ..Default::default() };
+        assert!(f.svc.save_cost_guard(inverted).is_err());
+        let negative = CostGuardConfig { egress_usd_per_gb: -1.0, ..Default::default() };
+        assert!(f.svc.save_cost_guard(negative).is_err());
+        assert_eq!(f.svc.settings().cost_guard, guard, "rejected saves leave the settings untouched");
     }
 }

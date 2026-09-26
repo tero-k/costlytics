@@ -10,12 +10,19 @@ use duckdb::Connection;
 /// originating file path as `source_file`.
 ///
 /// `x_ServiceCode` is an AWS extension column that may not be present in all
-/// FOCUS 1.2 exports — it is read via `TRY_CAST` so missing columns yield NULL.
+/// FOCUS 1.2 exports. A view cannot reference a column the files lack (not
+/// even via `TRY_CAST`), so the first file's schema decides whether it is
+/// read or replaced by NULL.
 pub fn register_view(conn: &Connection, files: &[String]) -> Result<(), duckdb::Error> {
     if files.is_empty() {
         return Err(duckdb::Error::InvalidQuery);
     }
     let file_list = build_file_list(files);
+    let service_code = if has_column(conn, &files[0], "x_ServiceCode")? {
+        "CAST(x_ServiceCode AS VARCHAR)"
+    } else {
+        "NULL::VARCHAR"
+    };
     let sql = format!(
         r#"CREATE OR REPLACE VIEW normalized_cost AS
 SELECT
@@ -39,7 +46,7 @@ SELECT
 
     -- Service
     CAST(ServiceName        AS VARCHAR)          AS service_name,
-    TRY_CAST(x_ServiceCode  AS VARCHAR)          AS service_code,
+    {service_code}                               AS service_code,
     CAST(ServiceCategory    AS VARCHAR)          AS service_category,
     CAST(ServiceSubcategory AS VARCHAR)          AS service_subcategory,
 
@@ -86,10 +93,22 @@ SELECT
 
 FROM read_parquet({file_list}, filename=true, hive_partitioning=false)
 "#,
-        file_list = file_list
+        file_list = file_list,
+        service_code = service_code
     );
     conn.execute_batch(&sql)?;
     Ok(())
+}
+
+/// Whether the Parquet file at `file` has a column named `column` (reads
+/// only the file's footer).
+fn has_column(conn: &Connection, file: &str, column: &str) -> Result<bool, duckdb::Error> {
+    let sql = format!(
+        "SELECT count(*) FROM (DESCRIBE SELECT * FROM read_parquet('{}')) WHERE column_name = ?",
+        file.replace('\'', "''")
+    );
+    let count: i64 = conn.query_row(&sql, [column], |row| row.get(0))?;
+    Ok(count > 0)
 }
 
 /// Build a DuckDB array literal from a list of file paths.
@@ -263,6 +282,20 @@ mod tests {
             .unwrap();
         // DuckDB resolves the path — just check it's non-empty
         assert!(!source_file.is_empty());
+    }
+
+    #[test]
+    fn focus12_view_without_service_code_column_yields_null() {
+        let select = FOCUS12_SELECT.replace(",\n    'AmazonEC2'    AS x_ServiceCode", "");
+        assert!(!select.contains("x_ServiceCode"));
+        let (_dir, path) = write_parquet(&select);
+        let conn = open_conn();
+        register_view(&conn, &[path]).unwrap();
+
+        let service_code: Option<String> = conn
+            .query_row("SELECT service_code FROM normalized_cost", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(service_code, None);
     }
 
     #[test]

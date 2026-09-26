@@ -73,6 +73,10 @@ SELECT
             THEN 'Purchase'
         WHEN line_item_line_item_type = 'SavingsPlanNegation'
             THEN 'Adjustment'
+        -- Negotiated/bundled price reductions. Kept apart from 'Credit'
+        -- (one-off promotional credits) so the UI can show both, distinctly.
+        WHEN line_item_line_item_type IN ('EdpDiscount', 'BundledDiscount', 'PrivateRateDiscount', 'DistributorDiscount')
+            THEN 'Discount'
         ELSE 'Other'
     END                                                  AS charge_category,
     NULL::VARCHAR                                        AS charge_class,
@@ -305,6 +309,38 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(charge_category, "Usage");
+    }
+
+    /// Discount line types map to their own 'Discount' category, not
+    /// 'Other' and not 'Credit'; true credits stay 'Credit'.
+    #[test]
+    fn cur2_discount_and_credit_line_types_are_categorized() {
+        let row = |line_type: &str, cost: f64| {
+            CUR2_SELECT
+                .replace("'Usage'        AS line_item_line_item_type", &format!("'{line_type}' AS line_item_line_item_type"))
+                .replace("100.0          AS line_item_unblended_cost", &format!("{cost} AS line_item_unblended_cost"))
+        };
+        for (line_type, expected) in [
+            ("EdpDiscount", "Discount"),
+            ("BundledDiscount", "Discount"),
+            ("PrivateRateDiscount", "Discount"),
+            ("DistributorDiscount", "Discount"),
+            ("Credit", "Credit"),
+            ("Refund", "Refund"),
+        ] {
+            let sql = row(line_type, -5.0);
+            assert!(sql.contains(line_type), "fixture substitution failed for {line_type}");
+            let (_dir, path) = write_parquet(&sql);
+            let conn = open_conn();
+            register_view(&conn, &[path]).unwrap();
+            let (category, amortized): (String, f64) = conn
+                .query_row("SELECT charge_category, amortized_cost FROM normalized_cost", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(category, expected, "{line_type}");
+            assert!((amortized + 5.0).abs() < 1e-9, "{line_type}: negative cost kept, got {amortized}");
+        }
     }
 
     #[test]

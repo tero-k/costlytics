@@ -6,4 +6,5 @@ pub mod fixtures;
 pub mod manifests;
 pub mod object_store;
 pub mod queries;
+pub mod scan_index;
 pub mod schema_detection;

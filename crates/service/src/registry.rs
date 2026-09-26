@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use data::config::{DataSource, SourceType};
 use data::queries::summary::CostRepository;
+use data::scan_index::ScanIndex;
 
 use crate::error::ServiceError;
 use crate::register::Registered;
@@ -16,6 +17,15 @@ pub enum SourceStatus {
     Registered { detected_format: String, file_count: usize },
     /// Registration failed; `reason` is human-readable.
     Skipped { reason: String },
+}
+
+/// What a registered source's queries read, for cost estimates.
+#[derive(Debug, Clone)]
+pub struct SourceScan {
+    /// Queries read over the network (an `s3://` source).
+    pub remote: bool,
+    /// `None` when the source's footers could not be indexed.
+    pub index: Option<Arc<ScanIndex>>,
 }
 
 /// One configured source's identity plus its registration outcome.
@@ -38,6 +48,8 @@ struct Inner {
     /// In configured order; `default_source_id` is the first entry.
     diagnostics: Vec<SourceDiagnostic>,
     repos: HashMap<String, Arc<dyn CostRepository>>,
+    /// Kept alongside `repos`: present exactly when the source is registered.
+    scans: HashMap<String, SourceScan>,
     /// Registry-wide monotonically increasing counter; every
     /// [`SourceRegistry::mark_pending`] call draws its generation from here
     /// and increments it. Because generations are drawn from one shared
@@ -80,6 +92,7 @@ impl SourceRegistry {
     pub fn mark_pending(&self, source: &DataSource) -> u64 {
         let mut inner = self.write();
         inner.repos.remove(&source.id);
+        inner.scans.remove(&source.id);
         let generation = inner.next_generation;
         inner.next_generation += 1;
         let diag = SourceDiagnostic {
@@ -102,6 +115,7 @@ impl SourceRegistry {
         let status = match result {
             Ok(r) => {
                 inner.repos.insert(id.to_string(), r.repo);
+                inner.scans.insert(id.to_string(), SourceScan { remote: r.remote, index: r.scan_index });
                 SourceStatus::Registered {
                     detected_format: r.detected_format,
                     file_count: r.file_count,
@@ -109,6 +123,7 @@ impl SourceRegistry {
             }
             Err(reason) => {
                 inner.repos.remove(id);
+                inner.scans.remove(id);
                 SourceStatus::Skipped { reason }
             }
         };
@@ -143,6 +158,7 @@ impl SourceRegistry {
         let mut inner = self.write();
         inner.diagnostics.retain(|d| d.id != id);
         inner.repos.remove(id);
+        inner.scans.remove(id);
     }
 
     pub fn diagnostics(&self) -> Vec<SourceDiagnostic> {
@@ -155,16 +171,30 @@ impl SourceRegistry {
         self.read().diagnostics.first().map(|d| d.id.clone())
     }
 
-    /// Resolves `source_id` (or the default source) to its repository.
-    pub fn repo(&self, source_id: Option<&str>) -> Result<Arc<dyn CostRepository>, ServiceError> {
-        let id = match source_id {
-            Some(id) => id.to_string(),
+    fn resolve_id(&self, source_id: Option<&str>) -> Result<String, ServiceError> {
+        match source_id {
+            Some(id) => Ok(id.to_string()),
             None => self
                 .default_source_id()
-                .ok_or_else(|| ServiceError::bad_request("no sources configured"))?,
-        };
+                .ok_or_else(|| ServiceError::bad_request("no sources configured")),
+        }
+    }
+
+    /// Resolves `source_id` (or the default source) to its repository.
+    pub fn repo(&self, source_id: Option<&str>) -> Result<Arc<dyn CostRepository>, ServiceError> {
+        let id = self.resolve_id(source_id)?;
         self.read()
             .repos
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| ServiceError::bad_request(format!("unknown source_id '{}'", id)))
+    }
+
+    /// Resolves `source_id` (or the default source) to its scan info.
+    pub fn scan(&self, source_id: Option<&str>) -> Result<SourceScan, ServiceError> {
+        let id = self.resolve_id(source_id)?;
+        self.read()
+            .scans
             .get(&id)
             .cloned()
             .ok_or_else(|| ServiceError::bad_request(format!("unknown source_id '{}'", id)))
@@ -187,6 +217,8 @@ mod tests {
             detected_format: "focus12".into(),
             file_count: 2,
             billing_periods: vec!["2026-08".into()],
+            remote: false,
+            scan_index: None,
         }
     }
 

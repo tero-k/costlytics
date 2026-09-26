@@ -6,6 +6,7 @@ use data::config::{DataSource, S3AuthConfig};
 use data::duckdb_pool::{self, S3Auth};
 use data::object_store::{DuckDbObjectStore, LocalObjectStore, YearMonth};
 use data::queries::summary::{CostRepository, DuckDbCostRepository};
+use data::scan_index::{self, ScanIndex};
 use data::schema_detection::{self, DetectedSchema};
 
 /// A successfully registered source: a queryable repository plus what
@@ -15,6 +16,11 @@ pub struct Registered {
     pub detected_format: String,
     pub file_count: usize,
     pub billing_periods: Vec<String>,
+    /// Whether queries read over the network (an `s3://` source).
+    pub remote: bool,
+    /// Row-group index for cost estimates; `None` if the source is empty or
+    /// the footers could not be indexed (estimates then report "unknown").
+    pub scan_index: Option<Arc<ScanIndex>>,
 }
 
 impl std::fmt::Debug for Registered {
@@ -23,6 +29,7 @@ impl std::fmt::Debug for Registered {
             .field("detected_format", &self.detected_format)
             .field("file_count", &self.file_count)
             .field("billing_periods", &self.billing_periods)
+            .field("remote", &self.remote)
             .finish_non_exhaustive()
     }
 }
@@ -110,24 +117,37 @@ pub fn register_source(source: &DataSource, secret: Option<&str>) -> Result<Regi
     let files: Vec<String> = partitions.into_iter().flat_map(|p| p.files).collect();
 
     let mut detected_format = "none";
+    let mut scan_index = None;
     if !files.is_empty() {
-        let register = match schema_detection::detect_schema(&conn, &files[0]) {
+        let (register, columns) = match schema_detection::detect_schema(&conn, &files[0]) {
             Ok(DetectedSchema::Focus12) => {
                 detected_format = "focus12";
-                focus12::register_view(&conn, &files)
+                (focus12::register_view(&conn, &files), &scan_index::FOCUS_COLUMNS)
             }
             Ok(DetectedSchema::Cur2) => {
                 detected_format = "cur2";
-                cur2::register_view(&conn, &files)
+                (cur2::register_view(&conn, &files), &scan_index::CUR2_COLUMNS)
             }
             Ok(DetectedSchema::Focus10) => {
                 detected_format = "focus10";
-                focus10::register_view(&conn, &files)
+                (focus10::register_view(&conn, &files), &scan_index::FOCUS_COLUMNS)
             }
             Ok(_) => return Err("detected schema is not FOCUS 1.0/1.2 or CUR 2.0".to_string()),
             Err(e) => return Err(format!("schema detection failed: {e}")),
         };
         register.map_err(|e| format!("failed to register view: {e}"))?;
+        // Best effort: a source without an index still answers queries.
+        scan_index = match ScanIndex::build(&conn, &files, columns) {
+            Ok(index) => Some(Arc::new(index)),
+            Err(e) => {
+                let mut error = e.to_string();
+                if let Some(S3Auth::AccessKey { secret, .. }) = &auth {
+                    error = scrub_secret(&error, secret);
+                }
+                tracing::warn!(source = %source.id, %error, "failed to index Parquet footers for cost estimates");
+                None
+            }
+        };
     }
     drop(conn);
 
@@ -136,6 +156,8 @@ pub fn register_source(source: &DataSource, secret: Option<&str>) -> Result<Regi
         detected_format: detected_format.to_string(),
         file_count: files.len(),
         billing_periods,
+        remote: source.is_s3(),
+        scan_index,
     })
 }
 
@@ -164,6 +186,25 @@ mod tests {
         assert_eq!(r.detected_format, "focus12");
         assert!(r.file_count > 0);
         assert!(r.billing_periods.contains(&"2026-08".to_string()));
+    }
+
+    /// Exports that write `billing_period=YYYY-MM` in lower case must register
+    /// every month, not just upper-case ones.
+    #[test]
+    fn registers_lowercase_billing_period_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        data::fixtures::generate_focus12_fixture(dir.path()).unwrap();
+        for ym in ["2026-08", "2026-09"] {
+            std::fs::rename(
+                dir.path().join(format!("BILLING_PERIOD={ym}")),
+                dir.path().join(format!("billing_period={ym}")),
+            )
+            .unwrap();
+        }
+        let r = register_source(&local(dir.path()), None).unwrap();
+        assert_eq!(r.detected_format, "focus12");
+        assert_eq!(r.billing_periods, vec!["2026-08".to_string(), "2026-09".to_string()]);
+        assert_eq!(r.file_count, 2);
     }
 
     #[test]

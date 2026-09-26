@@ -111,11 +111,17 @@ pub fn build_secret_sql(auth: &S3Auth) -> String {
 /// For S3 sources, call `init_connection(&conn, &auth)` on the first connection obtained from
 /// the pool immediately after building — because all pool connections share the
 /// same underlying in-memory DuckDB instance, the initialisation applies to all.
+///
+/// Enables DuckDB's Parquet metadata cache: every query over the
+/// `normalized_cost` view opens every registered file's footer to decide
+/// which row groups to skip, and without the cache each query re-fetches
+/// those footers (one ranged GET per file over S3).
 pub fn build_pool() -> Result<DbPool, DbError> {
     let manager = DuckdbConnectionManager::memory()?;
     let pool = r2d2::Pool::builder()
         .max_size(2)
         .build(manager)?;
+    pool.get()?.execute_batch("SET GLOBAL parquet_metadata_cache = true;")?;
     Ok(pool)
 }
 
@@ -236,5 +242,19 @@ mod tests {
         // Should be able to get a connection and run a simple query
         let conn = pool.get().unwrap();
         conn.execute_batch("SELECT 1").unwrap();
+    }
+
+    #[test]
+    fn build_pool_enables_parquet_metadata_cache_on_every_connection() {
+        let pool = build_pool().unwrap();
+        // Hold both pooled connections so the second is a distinct one.
+        let a = pool.get().unwrap();
+        let b = pool.get().unwrap();
+        for conn in [&a, &b] {
+            let enabled: bool = conn
+                .query_row("SELECT current_setting('parquet_metadata_cache')", [], |r| r.get(0))
+                .unwrap();
+            assert!(enabled);
+        }
     }
 }

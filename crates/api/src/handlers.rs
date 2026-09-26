@@ -5,11 +5,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use data::config::CostGuardConfig;
 use serde::Serialize;
 use service::app::{SaveSourceRequest, SourceIdRequest, TestSourceRequest};
 use service::cost::{
-    self, BreakdownRequest, CompareRequest, FilterDimension, FilterValuesQuery, SummaryRequest,
-    TagValuesQuery, TimeseriesRequest,
+    self, BreakdownRequest, CompareRequest, EstimateRequest, FilterDimension, FilterValuesQuery, ResourceSearchRequest,
+    SummaryRequest, TagValuesQuery, TimeseriesRequest,
 };
 use service::{ErrorKind, ServiceError};
 
@@ -61,6 +62,14 @@ pub async fn cost_compare(State(s): State<AppState>, Json(req): Json<CompareRequ
     run(move || cost::cost_compare(&s.registry, req)).await
 }
 
+pub async fn cost_estimate(State(s): State<AppState>, Json(req): Json<EstimateRequest>) -> Response {
+    run(move || s.cost_estimate(req)).await
+}
+
+pub async fn cost_resource_search(State(s): State<AppState>, Json(req): Json<ResourceSearchRequest>) -> Response {
+    run(move || cost::resource_search(&s.registry, req)).await
+}
+
 async fn values(s: AppState, dim: FilterDimension, q: FilterValuesQuery) -> Response {
     run(move || cost::filter_values(&s.registry, dim, q)).await
 }
@@ -107,6 +116,10 @@ pub async fn settings_source_test(State(s): State<AppState>, Json(req): Json<Tes
 
 pub async fn settings_source_reload(State(s): State<AppState>, Json(req): Json<SourceIdRequest>) -> Response {
     run(move || s.reload_source(req)).await
+}
+
+pub async fn settings_cost_guard_save(State(s): State<AppState>, Json(req): Json<CostGuardConfig>) -> Response {
+    run(move || s.save_cost_guard(req)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +220,15 @@ mod tests {
             Ok(vec!["Environment".to_string(), "Team".to_string()])
         }
 
+        fn search_resources(
+            &self,
+            _filter: &CostFilter,
+            _needle: &str,
+            _limit: usize,
+        ) -> Result<Vec<String>, data::queries::summary::QueryError> {
+            Ok(vec!["i-abc123".to_string()])
+        }
+
         fn distinct_tag_values(
             &self,
             _key: &str,
@@ -229,7 +251,7 @@ mod tests {
     }
 
     fn service_with(sources: Vec<data::config::DataSource>) -> service::CostlyticsService {
-        let config = data::config::AppConfig { server: Default::default(), sources };
+        let config = data::config::AppConfig { server: Default::default(), sources, cost_guard: Default::default() };
         service::CostlyticsService::new(config, None, Arc::new(service::secrets::MemorySecretStore::default()))
     }
 
@@ -239,6 +261,8 @@ mod tests {
             detected_format: "focus12".into(),
             file_count,
             billing_periods: vec![],
+            remote: false,
+            scan_index: None,
         }
     }
 

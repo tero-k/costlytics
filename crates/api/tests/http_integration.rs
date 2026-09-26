@@ -22,6 +22,7 @@ async fn http_cost_summary_matches_fixture_total() {
 
     let config = AppConfig {
         server: ServerConfig::default(),
+        cost_guard: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
@@ -77,6 +78,7 @@ async fn http_cost_summary_matches_focus10_fixture_total() {
 
     let config = AppConfig {
         server: ServerConfig::default(),
+        cost_guard: Default::default(),
         sources: vec![DataSource {
             id: "test-focus10-source".into(),
             name: "Test FOCUS 1.0 fixture source".into(),
@@ -131,6 +133,7 @@ async fn cur2_cost_summary_total(metric: &str) -> f64 {
 
     let config = AppConfig {
         server: ServerConfig::default(),
+        cost_guard: Default::default(),
         sources: vec![DataSource {
             id: "test-cur2-source".into(),
             name: "Test CUR 2.0 fixture source".into(),
@@ -202,6 +205,7 @@ async fn http_timeseries_matches_fixture_total() {
 
     let config = AppConfig {
         server: ServerConfig::default(),
+        cost_guard: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
@@ -264,6 +268,7 @@ async fn http_filter_values_and_compare_over_real_http() {
 
     let config = AppConfig {
         server: ServerConfig::default(),
+        cost_guard: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
@@ -379,6 +384,7 @@ async fn http_sources_list_reflects_configured_sources() {
 
     let config = AppConfig {
         server: ServerConfig::default(),
+        cost_guard: Default::default(),
         sources: vec![
             DataSource {
                 id: "local-good".into(),
@@ -482,4 +488,75 @@ async fn http_settings_add_and_delete_source() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(json["sources"], serde_json::json!([]));
+}
+
+/// `POST /api/v1/cost/estimate` over HTTP: a local source reports its read
+/// size but never a warning tier (local reads are free).
+#[tokio::test]
+async fn http_cost_estimate_for_local_source() {
+    let dir = tempfile::tempdir().unwrap();
+    generate_focus12_fixture(dir.path()).unwrap();
+    let config = AppConfig {
+        server: ServerConfig::default(),
+        cost_guard: Default::default(),
+        sources: vec![DataSource {
+            id: "test-source".into(),
+            name: "Test fixture source".into(),
+            s3_uri: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        }],
+    };
+    let app = build_app(config).expect("build_app should succeed");
+
+    let range = serde_json::json!([{ "start": "2026-08-01", "end": "2026-09-01" }]);
+    let payload = serde_json::json!({ "scans": [range.clone(), range] });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/cost/estimate")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["remote"], false, "{json}");
+    assert_eq!(json["known"], true, "{json}");
+    assert_eq!(json["tier"], "none", "{json}");
+    assert!(json["bytes"].as_u64().unwrap() > 0, "{json}");
+    assert_eq!(json["hard_limit_usd"], 1.0, "{json}");
+}
+
+/// `POST /api/v1/cost/resource-search` over HTTP: a substring search scoped
+/// to the requested date range.
+#[tokio::test]
+async fn http_resource_search_finds_fixture_resource() {
+    let dir = tempfile::tempdir().unwrap();
+    generate_focus12_fixture(dir.path()).unwrap();
+    let config = AppConfig {
+        server: ServerConfig::default(),
+        cost_guard: Default::default(),
+        sources: vec![DataSource {
+            id: "test-source".into(),
+            name: "Test fixture source".into(),
+            s3_uri: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        }],
+    };
+    let app = build_app(config).expect("build_app should succeed");
+
+    let payload = serde_json::json!({ "start": "2026-08-01", "end": "2026-09-01", "q": "ABC" });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/cost/resource-search")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["values"], serde_json::json!(["i-abc123", "bucket-abc"]), "{json}");
 }

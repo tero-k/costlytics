@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{error::ServiceError, registry::SourceRegistry};
+use data::config::CostGuardConfig;
 
 /// Maximum allowable query date range, in days (~5 years).
 const MAX_DATE_RANGE_DAYS: i64 = 5 * 366;
@@ -482,6 +483,46 @@ pub fn filter_values(
     result.map(|values| FilterValuesResponse { values }).map_err(|e| query_error(op, e))
 }
 
+// ---------------------------------------------------------------------------
+// POST /api/v1/cost/resource-search
+// ---------------------------------------------------------------------------
+
+const DEFAULT_RESOURCE_SEARCH_LIMIT: usize = 50;
+const MAX_RESOURCE_SEARCH_LIMIT: usize = 200;
+
+/// A resource-ID substring search, scoped like any `/cost/*` query (date
+/// range, metric for ranking, predicate fields) because resource lists are
+/// far too large for the whole-dataset `filter-values` lookups.
+#[derive(Debug, Deserialize)]
+pub struct ResourceSearchRequest {
+    pub source_id: Option<String>,
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+    pub metric: Option<String>,
+    #[serde(default)]
+    pub q: String,
+    pub limit: Option<usize>,
+    #[serde(flatten)]
+    pub filters: FilterFields,
+}
+
+pub fn resource_search(
+    registry: &SourceRegistry,
+    req: ResourceSearchRequest,
+) -> Result<FilterValuesResponse, ServiceError> {
+    let needle = req.q.trim();
+    if needle.is_empty() {
+        return Err(ServiceError::bad_request("q is required"));
+    }
+    let (repo, filter) = resolve_common(
+        registry, req.source_id.as_deref(), req.start, req.end, req.metric.as_deref(), &req.filters,
+    )?;
+    let limit = req.limit.unwrap_or(DEFAULT_RESOURCE_SEARCH_LIMIT).clamp(1, MAX_RESOURCE_SEARCH_LIMIT);
+    repo.search_resources(&filter, needle, limit)
+        .map(|values| FilterValuesResponse { values })
+        .map_err(|e| query_error("resource_search", e))
+}
+
 pub fn tag_values(registry: &SourceRegistry, query: TagValuesQuery) -> Result<FilterValuesResponse, ServiceError> {
     let key = match query.key {
         Some(k) if !k.is_empty() => k,
@@ -491,6 +532,120 @@ pub fn tag_values(registry: &SourceRegistry, query: TagValuesQuery) -> Result<Fi
     repo.distinct_tag_values(&key)
         .map(|values| FilterValuesResponse { values })
         .map_err(|e| query_error("distinct_tag_values", e))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/cost/estimate
+// ---------------------------------------------------------------------------
+
+/// Upper bound on `scans` per estimate request (a page fires a handful).
+const MAX_ESTIMATE_SCANS: usize = 32;
+/// Upper bound on ranges within one scan (`compare` reads two).
+const MAX_RANGES_PER_SCAN: usize = 4;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EstimateRange {
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+}
+
+/// The queries a page is about to run: one entry per query, each listing
+/// the date ranges that query reads (two for a current-vs-previous compare).
+#[derive(Debug, Deserialize)]
+pub struct EstimateRequest {
+    pub source_id: Option<String>,
+    pub scans: Vec<Vec<EstimateRange>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostTier {
+    None,
+    Soft,
+    Hard,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EstimateResponse {
+    /// Queries read over the network; local sources never cost anything.
+    pub remote: bool,
+    /// False when the source could not be indexed; bytes/usd are then 0.
+    pub known: bool,
+    pub bytes: u64,
+    pub requests: u64,
+    pub usd: f64,
+    pub tier: CostTier,
+    /// Some row groups lacked date statistics; the estimate is an upper bound.
+    pub stats_missing: bool,
+    pub soft_limit_usd: f64,
+    pub hard_limit_usd: f64,
+}
+
+const BYTES_PER_GB: f64 = 1_000_000_000.0;
+
+/// Estimates what running `req.scans` against the source would read from
+/// S3 and what that costs under `guard`'s rates, and classifies it against
+/// `guard`'s limits. `treat_local_as_remote` lets the dev/test harness
+/// exercise the warning flow against local fixtures.
+pub fn cost_estimate(
+    registry: &SourceRegistry,
+    guard: &CostGuardConfig,
+    treat_local_as_remote: bool,
+    req: EstimateRequest,
+) -> Result<EstimateResponse, ServiceError> {
+    if req.scans.is_empty() || req.scans.len() > MAX_ESTIMATE_SCANS {
+        return Err(ServiceError::bad_request(format!(
+            "scans must contain between 1 and {MAX_ESTIMATE_SCANS} entries"
+        )));
+    }
+    let mut scans = Vec::with_capacity(req.scans.len());
+    for ranges in &req.scans {
+        if ranges.is_empty() || ranges.len() > MAX_RANGES_PER_SCAN {
+            return Err(ServiceError::bad_request(format!(
+                "each scan must contain between 1 and {MAX_RANGES_PER_SCAN} ranges"
+            )));
+        }
+        for r in ranges {
+            validate_date_range(r.start, r.end)?;
+        }
+        scans.push(ranges.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>());
+    }
+
+    let scan = registry.scan(req.source_id.as_deref())?;
+    let remote = scan.remote || treat_local_as_remote;
+    let mut out = EstimateResponse {
+        remote,
+        known: scan.index.is_some(),
+        bytes: 0,
+        requests: 0,
+        usd: 0.0,
+        tier: CostTier::None,
+        stats_missing: false,
+        soft_limit_usd: guard.soft_limit_usd,
+        hard_limit_usd: guard.hard_limit_usd,
+    };
+    let Some(index) = scan.index else {
+        return Ok(out);
+    };
+    // No result or object cache: every query reads its row groups again.
+    for ranges in &scans {
+        let e = index.estimate(ranges);
+        out.bytes += e.bytes;
+        out.requests += e.requests;
+        out.stats_missing |= e.stats_missing;
+    }
+    out.usd = out.bytes as f64 / BYTES_PER_GB * guard.egress_usd_per_gb
+        + out.requests as f64 / 1000.0 * guard.get_usd_per_1000;
+    if guard.enabled && remote {
+        out.tier = if out.usd >= guard.hard_limit_usd {
+            CostTier::Hard
+        } else if out.usd >= guard.soft_limit_usd {
+            CostTier::Soft
+        } else {
+            CostTier::None
+        };
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -556,5 +711,77 @@ mod tests {
         let (_dir, reg) = registry_with_fixture();
         let v = filter_values(&reg, FilterDimension::Services, FilterValuesQuery::default()).unwrap();
         assert!(!v.values.is_empty());
+    }
+
+    fn resource_search_req(body: serde_json::Value) -> ResourceSearchRequest {
+        serde_json::from_value(body).unwrap()
+    }
+
+    #[test]
+    fn resource_search_requires_query_and_clamps_limit() {
+        let (_dir, reg) = registry_with_fixture();
+        let err = resource_search(
+            &reg,
+            resource_search_req(serde_json::json!({ "start": "2026-08-01", "end": "2026-09-01", "q": "  " })),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::BadRequest);
+
+        let res = resource_search(
+            &reg,
+            resource_search_req(serde_json::json!({ "start": "2026-08-01", "end": "2026-09-01", "q": "-", "limit": 100_000 })),
+        )
+        .unwrap();
+        assert!(res.values.len() <= MAX_RESOURCE_SEARCH_LIMIT);
+    }
+
+    fn estimate_req(scans: serde_json::Value) -> EstimateRequest {
+        serde_json::from_value(serde_json::json!({ "scans": scans })).unwrap()
+    }
+
+    fn aug() -> serde_json::Value {
+        serde_json::json!([{ "start": "2026-08-01", "end": "2026-09-01" }])
+    }
+
+    #[test]
+    fn estimate_for_local_source_never_alerts() {
+        let (_dir, reg) = registry_with_fixture();
+        let guard = CostGuardConfig { soft_limit_usd: 0.0, hard_limit_usd: 0.0, ..Default::default() };
+        let e = cost_estimate(&reg, &guard, false, estimate_req(serde_json::json!([aug()]))).unwrap();
+        assert!(!e.remote && e.known);
+        assert!(e.bytes > 0);
+        assert_eq!(e.tier, CostTier::None);
+    }
+
+    #[test]
+    fn estimate_tiers_follow_limits_and_query_count() {
+        let (_dir, reg) = registry_with_fixture();
+        let one = cost_estimate(&reg, &CostGuardConfig::default(), true, estimate_req(serde_json::json!([aug()]))).unwrap();
+        assert!(one.remote && one.usd > 0.0);
+        assert_eq!(one.tier, CostTier::None, "a tiny fixture is far below the default limits");
+
+        let three = cost_estimate(
+            &reg, &CostGuardConfig::default(), true, estimate_req(serde_json::json!([aug(), aug(), aug()])),
+        )
+        .unwrap();
+        assert_eq!(three.bytes, 3 * one.bytes);
+
+        let soft = CostGuardConfig { soft_limit_usd: one.usd, hard_limit_usd: one.usd * 2.0, ..Default::default() };
+        assert_eq!(cost_estimate(&reg, &soft, true, estimate_req(serde_json::json!([aug()]))).unwrap().tier, CostTier::Soft);
+        assert_eq!(cost_estimate(&reg, &soft, true, estimate_req(serde_json::json!([aug(), aug()]))).unwrap().tier, CostTier::Hard);
+
+        let disabled = CostGuardConfig { enabled: false, ..soft };
+        assert_eq!(cost_estimate(&reg, &disabled, true, estimate_req(serde_json::json!([aug(), aug()]))).unwrap().tier, CostTier::None);
+    }
+
+    #[test]
+    fn estimate_rejects_bad_ranges_and_shapes() {
+        let (_dir, reg) = registry_with_fixture();
+        let g = CostGuardConfig::default();
+        let backwards = serde_json::json!([[{ "start": "2026-09-01", "end": "2026-08-01" }]]);
+        for scans in [serde_json::json!([]), serde_json::json!([[]]), backwards] {
+            let err = cost_estimate(&reg, &g, false, estimate_req(scans)).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::BadRequest);
+        }
     }
 }

@@ -27,11 +27,12 @@ pub fn build_app_persistent(
 }
 
 fn build(config: data::config::AppConfig, settings_path: Option<PathBuf>) -> anyhow::Result<axum::Router> {
-    let svc = Arc::new(CostlyticsService::new(
-        config,
-        settings_path,
-        Arc::new(MemorySecretStore::default()),
-    ));
+    // Test-only: lets e2e tests exercise the S3 cost warning on local fixtures.
+    let local_as_remote = std::env::var("COSTLYTICS_COST_GUARD_TREAT_LOCAL_AS_REMOTE").is_ok_and(|v| v == "1");
+    let svc = Arc::new(
+        CostlyticsService::new(config, settings_path, Arc::new(MemorySecretStore::default()))
+            .with_local_treated_as_remote(local_as_remote),
+    );
     svc.register_all();
     Ok(routes::build_router(svc))
 }
