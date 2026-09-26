@@ -68,7 +68,9 @@ cargo tauri build    # or build an installer
 
 `cargo tauri build` writes installers to `target/release/bundle/`: `msi` and
 `nsis` on Windows, `dmg` and `macos` on macOS. A macOS bundle must be built on
-a Mac, and code signing and notarization are not configured.
+a Mac. Local builds are unsigned; the signed and notarized DMGs attached to
+releases are built by the `macOS` GitHub Actions workflow
+(`.github/workflows/macos.yml`) when a `vX.Y.Z` tag is pushed.
 
 Settings are stored in `settings.toml` in the app config directory
 (`%APPDATA%\app.costlytics.desktop\` on Windows,

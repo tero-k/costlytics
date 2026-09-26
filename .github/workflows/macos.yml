@@ -1,0 +1,134 @@
+# Builds signed and notarized macOS DMGs (Apple Silicon and Intel).
+#
+# Runs on a pushed vX.Y.Z tag, or manually from the Actions tab. On a tag the
+# DMGs are attached to that tag's GitHub release (a draft one is created if it
+# doesn't exist yet); a manual run on a branch only keeps them as workflow
+# artifacts. Windows installers are signed and uploaded by hand.
+#
+# Uses the secrets of the `Release` environment:
+#   MACOS_CERTIFICATE_BASE64    Developer ID Application certificate (.p12), base64
+#   MACOS_CERTIFICATE_PASSWORD  password of the .p12
+#   APPLE_ID                    Apple ID used for notarization
+#   APPLE_PASSWORD              app-specific password of that Apple ID
+#   APPLE_TEAM_ID               Developer Team ID
+
+name: macOS
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: macos-latest
+    environment: Release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # the frontend embeds `git describe --tags` as the build id
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      # Tauri imports the certificate into a temporary keychain, signs the
+      # app and the DMG, and notarizes and staples the app.
+      - name: Build and sign
+        working-directory: crates/app
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx --yes @tauri-apps/cli@2 build --target ${{ matrix.target }} --bundles dmg
+
+      - name: Locate DMG
+        id: dmg
+        run: |
+          dmg=$(ls target/${{ matrix.target }}/release/bundle/dmg/*.dmg)
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$dmg")" >> "$GITHUB_OUTPUT"
+
+      # The app inside is already notarized; notarizing the DMG as well lets
+      # Gatekeeper accept the download itself, also offline.
+      - name: Notarize and staple DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "${{ steps.dmg.outputs.path }}" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "${{ steps.dmg.outputs.path }}"
+
+      - name: Verify signature and notarization
+        run: |
+          dmg="${{ steps.dmg.outputs.path }}"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose "$dmg"
+          mnt=$(mktemp -d)
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
+          codesign --verify --deep --strict --verbose=2 "$mnt"/*.app
+          spctl --assess --type execute --verbose "$mnt"/*.app
+          hdiutil detach "$mnt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dmg.outputs.name }}
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dmg
+          merge-multiple: true
+
+      - name: Upload DMGs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --draft --verify-tag --title "Costlytics ${TAG#v}" --notes ""
+          fi
+          gh release upload "$TAG" dmg/*.dmg --clobber
