@@ -6,3 +6,7 @@
 .env.*
 *.local.toml
 /crates/app/gen/
+
+# AI-assistant planning notes (local only)
+/.superpowers/
+/docs/superpowers/
