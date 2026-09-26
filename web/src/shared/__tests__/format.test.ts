@@ -85,6 +85,19 @@ describe('formatCurrency / formatCurrencyCompact happy path', () => {
     );
   });
 
+  it('keeps sub-unit amounts distinguishable instead of rounding to zero', () => {
+    const usd = (v: number) =>
+      new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumSignificantDigits: 2 }).format(v);
+    expect(formatCurrencyCompact(0.0042, 'USD')).toBe(usd(0.0042));
+    expect(formatCurrencyCompact(-0.015, 'USD')).toBe(usd(-0.015));
+    expect(formatCurrencyCompact(0.0042, 'USD')).not.toBe(formatCurrencyCompact(0.0084, 'USD'));
+  });
+
+  it('never renders negative zero', () => {
+    expect(formatCurrencyCompact(-0, 'USD')).toBe(formatCurrencyCompact(0, 'USD'));
+    expect(formatCurrencyCompact(-0, 'USD')).not.toContain('-');
+  });
+
   it('formats zero without throwing', () => {
     expect(formatCurrency(0, 'USD')).toMatch(/0/);
   });

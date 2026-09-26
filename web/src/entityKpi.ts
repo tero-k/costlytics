@@ -32,6 +32,7 @@ interface CardIds {
   total: string;
   rows: string;
   currency: string;
+  credits: string;
 }
 
 function cardIds(idPrefix: string): CardIds {
@@ -39,6 +40,7 @@ function cardIds(idPrefix: string): CardIds {
     total: `${idPrefix}-kpi-total`,
     rows: `${idPrefix}-kpi-rows`,
     currency: `${idPrefix}-kpi-currency`,
+    credits: `${idPrefix}-kpi-credits`,
   };
 }
 
@@ -51,6 +53,8 @@ function cardDefs(ids: CardIds): KpiCardDef[] {
     { id: ids.total, label: 'Total cost' },
     { id: ids.rows, label: 'Row count' },
     { id: ids.currency, label: 'Currency' },
+    // Filled by `entityTrend.ts`; hidden unless the period has credits.
+    { id: ids.credits, label: 'Credits & discounts', hidden: true },
   ];
 }
 

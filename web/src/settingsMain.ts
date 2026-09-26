@@ -4,8 +4,10 @@ import {
   getSettings,
   getSources,
   reloadSource,
+  saveCostGuard,
   saveSource,
   testSource,
+  type CostGuardSettings,
   type SourceSettings,
   type SourceStatus,
 } from './api.ts';
@@ -14,6 +16,9 @@ import { errorMessage } from './shared/format.ts';
 import { setLoadingIndicatorVisible } from './shared/statusBar.ts';
 import { formToSource, sourceToForm, type SourceFormValues } from './shared/sourceForm.ts';
 import { isTauri } from './transport.ts';
+import { initAppShell } from './shared/appShell.ts';
+
+initAppShell();
 
 /**
  * Settings page: lists configured data sources with their live registration
@@ -36,6 +41,44 @@ const REFRESH_POLL_LIMIT = 120;
 let pendingPollAttempts = 0;
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector<T>(sel)!;
+
+/** Fills the Cost guard form once; later refreshes (polling) keep the user's unsaved edits. */
+let costGuardFilled = false;
+
+function fillCostGuardForm(guard: CostGuardSettings): void {
+  if (costGuardFilled) return;
+  costGuardFilled = true;
+  $<HTMLSelectElement>('#cg-enabled').value = String(guard.enabled);
+  $<HTMLInputElement>('#cg-soft').value = String(guard.soft_limit_usd);
+  $<HTMLInputElement>('#cg-hard').value = String(guard.hard_limit_usd);
+  $<HTMLInputElement>('#cg-egress').value = String(guard.egress_usd_per_gb);
+  $<HTMLInputElement>('#cg-get').value = String(guard.get_usd_per_1000);
+}
+
+async function submitCostGuard(): Promise<void> {
+  const result = $('#cost-guard-result');
+  const num = (id: string): number => Number.parseFloat($<HTMLInputElement>(id).value);
+  const guard: CostGuardSettings = {
+    enabled: $<HTMLSelectElement>('#cg-enabled').value === 'true',
+    soft_limit_usd: num('#cg-soft'),
+    hard_limit_usd: num('#cg-hard'),
+    egress_usd_per_gb: num('#cg-egress'),
+    get_usd_per_1000: num('#cg-get'),
+  };
+  if (Object.values(guard).some((v) => typeof v === 'number' && !Number.isFinite(v))) {
+    result.className = 'form-result change-bad';
+    result.textContent = 'Every field needs a number.';
+    return;
+  }
+  try {
+    await saveCostGuard(guard);
+    result.className = 'form-result change-good';
+    result.textContent = 'Saved.';
+  } catch (err) {
+    result.className = 'form-result change-bad';
+    result.textContent = errorMessage(err);
+  }
+}
 
 function statusCell(s: SourceStatus | undefined): string {
   if (!s || s.state === 'pending') return `<td class="col-left">Registering&hellip;</td>`;
@@ -84,6 +127,7 @@ function renderTable(statuses: SourceStatus[]): void {
 async function refresh(): Promise<void> {
   try {
     const [s, statuses] = await Promise.all([getSettings(), getSources()]);
+    fillCostGuardForm(s.cost_guard);
     settings = s.sources;
     renderTable(statuses.sources);
     if (statuses.sources.some((x) => x.state === 'pending')) {
@@ -254,6 +298,10 @@ function bind(): void {
   $('#f-kind').addEventListener('change', syncVisibility);
   $('#f-auth').addEventListener('change', syncVisibility);
   $<HTMLButtonElement>('#f-test').addEventListener('click', (e) => void withBusy(e.currentTarget as HTMLButtonElement, onTest));
+  $('#cost-guard-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    void submitCostGuard();
+  });
   $('#source-form').addEventListener('submit', (e) => {
     e.preventDefault();
     void withBusy($<HTMLButtonElement>('#f-save'), onSave);

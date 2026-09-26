@@ -1,12 +1,11 @@
 /**
- * Page-level status bar / date-range-default bootstrapping shared by every
- * Costlytics page (Overview's `main.ts`, Cost Explorer's `explorerMain.ts`).
- *
- * Every page shares the same `#date-start` / `#date-end` / `#metric-select`
- * controls and the same `#status-range` / `#status-metric` /
- * `#status-currency` / `#status-loading` status-bar elements (see
- * `index.html` / `explorer.html`), so the wiring between them lives here
- * once rather than being re-implemented per page.
+ * Page-level status bar wiring shared by every Costlytics page. The status
+ * bar itself is rendered by `appShell.ts`; every page shares the same
+ * `#date-start` / `#date-end` / `#metric-select` controls and the same
+ * `#status-range` / `#status-metric` / `#status-currency` /
+ * `#status-filters` / `#status-loading` elements, so the wiring between
+ * them lives here once. Initial date/metric values come from
+ * `appState.ts`.
  */
 
 import type { CostMetric } from '../api.ts';
@@ -17,26 +16,6 @@ const METRIC_LABELS: Record<CostMetric, string> = {
   list: 'List',
   contracted: 'Contracted',
 };
-
-function toDateInputValue(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-/** Defaults `#date-start`/`#date-end` to "current month to date" if present. */
-export function initDateRangeDefaults(): void {
-  const startInput = document.querySelector<HTMLInputElement>('#date-start');
-  const endInput = document.querySelector<HTMLInputElement>('#date-end');
-  if (!startInput || !endInput) return;
-
-  const today = new Date();
-  const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-
-  startInput.value = toDateInputValue(startOfMonth);
-  endInput.value = toDateInputValue(today);
-}
 
 function formatDisplayDate(iso: string): string {
   const date = new Date(`${iso}T00:00:00Z`);
@@ -87,4 +66,18 @@ export function initStatusBar(): void {
   document.querySelector('#date-start')?.addEventListener('change', updateStatusRangeAndMetric);
   document.querySelector('#date-end')?.addEventListener('change', updateStatusRangeAndMetric);
   document.querySelector('#metric-select')?.addEventListener('change', updateStatusRangeAndMetric);
+}
+
+/**
+ * Shows (or hides, for an empty string) the active per-page filter summary,
+ * e.g. "Filtered: 2 services, 1 account" — plan §57: a dashboard must always
+ * show what it is scoped to, not just in the filter widgets.
+ */
+export function updateStatusFilters(summary: string): void {
+  const el = document.querySelector<HTMLElement>('#status-filters');
+  const sep = document.querySelector<HTMLElement>('#status-filters-sep');
+  if (!el) return;
+  el.textContent = summary;
+  el.hidden = summary === '';
+  if (sep) sep.hidden = summary === '';
 }

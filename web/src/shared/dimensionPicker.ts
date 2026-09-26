@@ -31,6 +31,13 @@ export interface DimensionPickerConfig {
   paramName: string;
   /** DOM id of the `<select>` element, e.g. `'service-picker'`. */
   elementId: string;
+  /**
+   * Remember the selection in localStorage, so returning to the page (a
+   * separate document, without the query param) restores it. Used as a
+   * fallback after the URL param. Off for the source picker, whose
+   * persistence is shared across pages (`appState.ts`).
+   */
+  persist?: boolean;
 }
 
 export interface DimensionPicker {
@@ -59,6 +66,26 @@ export interface DimensionPicker {
 /** Creates a {@link DimensionPicker} bound to its own URL param and DOM element. */
 export function createDimensionPicker(config: DimensionPickerConfig): DimensionPicker {
   const { paramName, elementId } = config;
+  const storageKey = `costlytics.picker.${paramName}.v1`;
+
+  function getStored(): string | null {
+    if (!config.persist) return null;
+    try {
+      return localStorage.getItem(storageKey);
+    } catch {
+      return null;
+    }
+  }
+
+  function setStored(value: string | null): void {
+    if (!config.persist) return;
+    try {
+      if (value) localStorage.setItem(storageKey, value);
+      else localStorage.removeItem(storageKey);
+    } catch {
+      // Storage unavailable: the selection just isn't remembered.
+    }
+  }
 
   function getElement(): HTMLSelectElement | null {
     return document.querySelector<HTMLSelectElement>(`#${elementId}`);
@@ -106,11 +133,12 @@ export function createDimensionPicker(config: DimensionPickerConfig): DimensionP
     }
     picker.appendChild(fragment);
 
-    const requested = getUrlParam();
-    const initial = requested && sortedValues.includes(requested) ? requested : (sortedValues[0] ?? null);
+    const initial =
+      [getUrlParam(), getStored()].find((v) => v && sortedValues.includes(v)) ?? sortedValues[0] ?? null;
 
     picker.value = initial ?? '';
     updateUrlParam(initial);
+    if (initial) setStored(initial);
     return initial;
   }
 
@@ -121,6 +149,7 @@ export function createDimensionPicker(config: DimensionPickerConfig): DimensionP
     picker.addEventListener('change', () => {
       const value = getSelected();
       updateUrlParam(value);
+      setStored(value);
       onChange(value);
     });
   }

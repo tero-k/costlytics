@@ -1,7 +1,10 @@
 import { getFilterValues, type FilterFields, type FilterValuesDimension } from './api.ts';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { initAppShell } from './shared/appShell.ts';
+import { initPageFilters, type PageFilterKey } from './shared/pageFilters.ts';
 import { createDimensionPicker } from './shared/dimensionPicker.ts';
 import { initSourcePicker } from './shared/sourcePicker.ts';
+import { checkInitialLoad, installCostGuard, type PageQueries } from './shared/costGuard.ts';
 import { initEntityKpi } from './entityKpi.ts';
 import { initEntityTrend } from './entityTrend.ts';
 import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
@@ -66,6 +69,8 @@ export interface EntityDetailPageConfig {
   entityNoun: string;
   /** DOM id prefix for this page's per-entity component containers. */
   idPrefix: string;
+  /** Per-page filters shown in the shell's filter slot — never the page's own entity dimension. */
+  pageFilters: PageFilterKey[];
   /** This page's breakdown-by-dimension charts, e.g. Service Detail's account/region/charge_category vs. Account Detail's service/region. */
   breakdowns: BreakdownDef[];
 }
@@ -78,7 +83,9 @@ export interface EntityDetailPageConfig {
  * has settled (success or failure).
  */
 export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig): Promise<void> {
-  const picker = createDimensionPicker({ paramName: config.paramName, elementId: config.elementId });
+  // Renders the shared controls the leaf components subscribe to — before they're built.
+  initAppShell();
+  const picker = createDimensionPicker({ paramName: config.paramName, elementId: config.elementId, persist: true });
 
   const entityConfig: EntityConfig = {
     entityNoun: config.entityNoun,
@@ -146,10 +153,13 @@ export async function bootstrapEntityDetailPage(config: EntityDetailPageConfig):
     await refreshAll();
   }
 
-  initDateRangeDefaults();
-  initStatusBar();
   picker.init(updatePlaceholderVisibility);
   await initSourcePicker(onSourceChange);
+  initPageFilters(config.pageFilters);
+  // KPI summary, trend, breakdowns' shared summary + one per chart, top resources.
+  const queries: PageQueries = { current: 4 + config.breakdowns.length, compare: 0 };
+  installCostGuard(queries);
+  void checkInitialLoad(queries);
 
   setLoadingIndicatorVisible(true);
   try {

@@ -57,12 +57,19 @@ function renderMessage(container: HTMLElement, className: string, message: strin
     </section>`;
 }
 
+/** A resource ID links to its Resources-tab detail (`resourceDetailMain.ts` intercepts it in-page). */
+function resourceCell(key: string | null): string {
+  if (key === null) return escapeHtml(formatKeyLabel(key));
+  const href = `/resource-detail.html?resource=${encodeURIComponent(key)}`;
+  return `<a class="resource-link" href="${escapeHtml(href)}" data-resource="${escapeHtml(key)}">${escapeHtml(key)}</a>`;
+}
+
 function renderTable(container: HTMLElement, rows: BreakdownRow[], currency: string): void {
   const bodyHtml = rows
     .map(
       (row) => `
         <tr>
-          <td class="col-left">${escapeHtml(formatKeyLabel(row.key))}</td>
+          <td class="col-left">${resourceCell(row.key)}</td>
           <td class="col-right">${formatCurrency(row.total, currency)}</td>
           <td class="col-right">${row.row_count.toLocaleString()}</td>
         </tr>`,

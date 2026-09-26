@@ -333,20 +333,122 @@ async function parseJsonOrThrow<TResponse>(res: Response): Promise<TResponse> {
   return data as TResponse;
 }
 
+// ---------------------------------------------------------------------------
+// Page-level filters (per-page Service/Account filter widgets)
+// ---------------------------------------------------------------------------
+
+/**
+ * Supplies the current page's filter selection (`shared/pageFilters.ts`),
+ * merged into every `/cost/*` request below — the same single choke point
+ * `withActiveSourceId` uses for the source, so none of the fetching modules
+ * need to know page filters exist.
+ */
+let pageFilterProvider: (() => Partial<FilterFields>) | null = null;
+
+export function setPageFilterProvider(provider: (() => Partial<FilterFields>) | null): void {
+  pageFilterProvider = provider;
+}
+
+const FILTER_KEYS = ['accounts', 'services', 'regions', 'charge_categories', 'resource_ids', 'tags'] as const;
+
+/**
+ * Fills each predicate field the request leaves empty from `extra`. A field
+ * the caller already set (e.g. a detail page's own `services: [selected]`
+ * entity filter) always wins, so a page filter can only narrow on
+ * dimensions the page doesn't already pin.
+ * @internal exported for tests
+ */
+export function mergeFilters<T extends Partial<FilterFields>>(req: T, extra: Partial<FilterFields>): T {
+  const merged: Partial<FilterFields> = { ...req };
+  for (const key of FILTER_KEYS) {
+    const value = extra[key];
+    const existing = req[key];
+    if (value && value.length > 0 && !(existing && existing.length > 0)) {
+      (merged as Record<string, unknown>)[key] = value;
+    }
+  }
+  return merged as T;
+}
+
+function withPageFilters<T extends Partial<FilterFields>>(req: T): T {
+  return pageFilterProvider ? mergeFilters(req, pageFilterProvider()) : req;
+}
+
+/** @internal exported for tests */
+export function withPageFiltersCompare(req: CompareRequest): CompareRequest {
+  if (!pageFilterProvider) return req;
+  const extra = pageFilterProvider();
+  return { ...req, current: mergeFilters(req.current ?? {}, extra), previous: mergeFilters(req.previous ?? {}, extra) };
+}
+
 export async function getSummary(req: SummaryRequest): Promise<CostSummary> {
-  return postJson<CostSummary>('/api/v1/cost/summary', req);
+  return postJson<CostSummary>('/api/v1/cost/summary', withPageFilters(req));
 }
 
 export async function getTimeseries(req: TimeseriesRequest): Promise<TimeSeriesResult> {
-  return postJson<TimeSeriesResult>('/api/v1/cost/timeseries', req);
+  return postJson<TimeSeriesResult>('/api/v1/cost/timeseries', withPageFilters(req));
 }
 
 export async function getBreakdown(req: BreakdownRequest): Promise<BreakdownResult> {
-  return postJson<BreakdownResult>('/api/v1/cost/breakdown', req);
+  return postJson<BreakdownResult>('/api/v1/cost/breakdown', withPageFilters(req));
 }
 
 export async function getCompare(req: CompareRequest): Promise<CompareResult> {
-  return postJson<CompareResult>('/api/v1/cost/compare', req);
+  return postJson<CompareResult>('/api/v1/cost/compare', withPageFiltersCompare(req));
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/cost/resource-search
+// ---------------------------------------------------------------------------
+
+export interface ResourceSearchRequest extends Partial<FilterFields> {
+  source_id?: string;
+  /** `YYYY-MM-DD`. */
+  start: string;
+  /** `YYYY-MM-DD`, exclusive. */
+  end: string;
+  metric?: CostMetric;
+  /** Case-insensitive substring of the resource ID; must be non-blank. */
+  q: string;
+  /** Defaults to 50 server-side; clamped to 1..=200. */
+  limit?: number;
+}
+
+/** Resource IDs matching `q` within the range/filters, most expensive first. */
+export async function searchResources(req: ResourceSearchRequest): Promise<string[]> {
+  const { values } = await postJson<FilterValuesResponse>('/api/v1/cost/resource-search', withPageFilters(req));
+  return values;
+}
+
+/** A half-open `[start, end)` range (exclusive `end`, like every `/cost/*` request). */
+export interface EstimateRange {
+  start: string;
+  end: string;
+}
+
+export type CostTier = 'none' | 'soft' | 'hard';
+
+/** Mirrors `service::cost::EstimateResponse`. */
+export interface EstimateResponse {
+  remote: boolean;
+  known: boolean;
+  bytes: number;
+  requests: number;
+  usd: number;
+  tier: CostTier;
+  stats_missing: boolean;
+  soft_limit_usd: number;
+  hard_limit_usd: number;
+}
+
+/**
+ * Estimates what a page's queries would read from S3: `scans` has one entry
+ * per query, each listing the ranges that query reads. `sourceId` overrides
+ * the active source (used while a source switch is still pending).
+ */
+export async function estimateCost(scans: EstimateRange[][], sourceId?: string): Promise<EstimateResponse> {
+  const body = sourceId === undefined ? { scans } : { scans, source_id: sourceId };
+  return postJson<EstimateResponse>('/api/v1/cost/estimate', body);
 }
 
 export async function getFilterValues(dimension: FilterValuesDimension): Promise<string[]> {
@@ -447,8 +549,18 @@ export interface SourceSettings extends DataSourceSettings {
   has_secret: boolean;
 }
 
+/** Mirrors `data::config::CostGuardConfig` (limits are USD per page load). */
+export interface CostGuardSettings {
+  enabled: boolean;
+  soft_limit_usd: number;
+  hard_limit_usd: number;
+  egress_usd_per_gb: number;
+  get_usd_per_1000: number;
+}
+
 export interface SettingsResponse {
   sources: SourceSettings[];
+  cost_guard: CostGuardSettings;
 }
 
 export interface TestSourceResponse {
@@ -483,4 +595,8 @@ export async function deleteSource(id: string): Promise<SourcesResponse> {
 
 export async function reloadSource(id: string): Promise<SourceStatus> {
   return postJson<SourceStatus>('/api/v1/settings/source-reload', { id });
+}
+
+export async function saveCostGuard(settings: CostGuardSettings): Promise<CostGuardSettings> {
+  return postJson<CostGuardSettings>('/api/v1/settings/cost-guard-save', settings);
 }

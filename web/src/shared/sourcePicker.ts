@@ -25,6 +25,8 @@
  * (highest first):
  *   1. `?source=` URL query param, if it names a registered source
  *      (bookmarked/shared links round-trip, same as the entity pickers).
+ *   1b. The source last selected on any page (persisted by `appState.ts`),
+ *      if still registered — so the choice carries across tabs/restarts.
  *   2. The backend's `default_source_id` (`resolve_source(None)`'s own
  *      fallback), IF it's registered — this is what makes a fresh page load
  *      match the backend's default, satisfying this task's "default source
@@ -53,6 +55,7 @@
 import { getSources, setActiveSourceId, type SourcesResponse } from '../api.ts';
 import { createDimensionPicker } from './dimensionPicker.ts';
 import { setLoadingIndicatorVisible } from './statusBar.ts';
+import { getStoredSourceId, persistSourceId } from './appState.ts';
 
 const PENDING_POLL_MS = 500;
 /** ~2 minutes: a slow S3 source must not block the page forever. */
@@ -136,8 +139,12 @@ export async function initSourcePicker(
       .sort((a, b) => a.localeCompare(b));
     loaded = true;
 
-    if (!picker.getUrlParam() && default_source_id && ids.includes(default_source_id)) {
-      picker.updateUrlParam(default_source_id);
+    // No `?source=` → the source last picked on any page (`appState.ts`),
+    // then the backend default — each only if it's registered.
+    if (!picker.getUrlParam()) {
+      const stored = getStoredSourceId();
+      const preferred = [stored, default_source_id].find((id) => id && ids.includes(id));
+      if (preferred) picker.updateUrlParam(preferred);
     }
   } catch {
     // Leave `ids`/`configured` at their zero defaults; the picker shows
@@ -147,6 +154,7 @@ export async function initSourcePicker(
 
   const initial = picker.populateOptions(ids);
   setActiveSourceId(initial);
+  if (loaded && initial) persistSourceId(initial);
 
   // `subscribeToControls`'s own `#source-picker` listener (added by every
   // fetching module) re-fetches on the same `change` event; this listener
@@ -167,6 +175,7 @@ export async function initSourcePicker(
   // those components' automatic re-fetch is allowed to be treated as final.
   picker.init((value) => {
     setActiveSourceId(value);
+    persistSourceId(value);
     onSourceChange?.(value);
   });
 

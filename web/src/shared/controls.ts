@@ -117,6 +117,11 @@ export function readChangesControls(): ChangesControls | null {
  * every component WITHOUT touching `kpiCards.ts`/`entityKpi.ts`/etc.
  * (mirrors `api.ts`'s `postJson`/`getJson` choke point for the same reason).
  *
+ * `#page-filters` (the shell's per-page Service/Account filter slot,
+ * `shared/pageFilters.ts`) is included unconditionally for the same reason:
+ * its widgets bubble one `change` per committed selection, and the
+ * selection reaches requests via `api.ts`'s page-filter provider.
+ *
  * `opts.extraIds` covers page-local controls beyond the shared set (e.g.
  * the Overview page's `#granularity-select`, used only by `trendChart.ts`).
  */
@@ -124,7 +129,7 @@ export function subscribeToControls(
   refresh: () => void,
   opts?: { explorer?: boolean; changes?: boolean; extraIds?: string[] },
 ): void {
-  const ids = ['#date-start', '#date-end', '#metric-select', '#source-picker'];
+  const ids = ['#date-start', '#date-end', '#metric-select', '#source-picker', '#page-filters'];
   if (opts?.explorer) ids.push('#dimension-select', '#top-n-input');
   if (opts?.changes) ids.push('#prev-date-start', '#prev-date-end', '#dimension-select', '#top-n-input');
   if (opts?.extraIds) ids.push(...opts.extraIds);

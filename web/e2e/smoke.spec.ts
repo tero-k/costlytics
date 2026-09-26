@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 // The single most repeated manual check across every prior session (per
-// `.git/sdd/tasks-playwright-e2e.md`): does each of the app's 7 pages load
+// `.git/sdd/tasks-playwright-e2e.md`): does each of the app's 8 pages load
 // cleanly, with the right nav link marked active and zero console/page
 // errors? This runs against the REAL backend + REAL fixtures (see
 // `playwright.config.ts`'s `webServer` array) — a broken/empty backend
@@ -19,6 +19,7 @@ const PAGES: Array<{ path: string; activeHref: string; title: string }> = [
   { path: '/cost-changes.html', activeHref: '/cost-changes.html', title: 'Cost Changes' },
   { path: '/settings.html', activeHref: '/settings.html', title: 'Settings' },
   { path: '/tags.html', activeHref: '/tags.html', title: 'Tags' },
+  { path: '/resource-detail.html', activeHref: '/resource-detail.html', title: 'Resources' },
 ];
 
 for (const { path, activeHref, title } of PAGES) {
@@ -46,7 +47,7 @@ for (const { path, activeHref, title } of PAGES) {
 
     const nav = page.locator('nav.app-nav');
     const links = nav.locator('a');
-    await expect(links).toHaveCount(7);
+    await expect(links).toHaveCount(8);
 
     const active = nav.locator('a.active');
     await expect(active).toHaveCount(1);

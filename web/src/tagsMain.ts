@@ -1,8 +1,11 @@
 import './style.css';
 import { getFilterValues, getTagValues } from './api.ts';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { initAppShell } from './shared/appShell.ts';
+import { initPageFilters } from './shared/pageFilters.ts';
 import { createDimensionPicker } from './shared/dimensionPicker.ts';
 import { initSourcePicker } from './shared/sourcePicker.ts';
+import { checkInitialLoad, installCostGuard, type PageQueries } from './shared/costGuard.ts';
 import { initEntityKpi } from './entityKpi.ts';
 import { initEntityTrend } from './entityTrend.ts';
 import { initEntityBreakdowns, type BreakdownDef } from './entityBreakdowns.ts';
@@ -60,14 +63,18 @@ import { createEntityOrchestrator } from './shared/entityOrchestrator.ts';
  * div) with no new logic to justify leaving it out.
  */
 
+// Renders the shared controls the leaf components (built at module level
+// below) subscribe to, so it must run first.
+initAppShell();
+
 const TAG_BREAKDOWNS: BreakdownDef[] = [
   { containerId: 'tags-by-service', dimension: 'service', title: 'Cost by service' },
   { containerId: 'tags-by-account', dimension: 'account', title: 'Cost by account' },
   { containerId: 'tags-by-region', dimension: 'region', title: 'Cost by region' },
 ];
 
-const keyPicker = createDimensionPicker({ paramName: 'tag_key', elementId: 'tag-key-picker' });
-const valuePicker = createDimensionPicker({ paramName: 'tag_value', elementId: 'tag-value-picker' });
+const keyPicker = createDimensionPicker({ paramName: 'tag_key', elementId: 'tag-key-picker', persist: true });
+const valuePicker = createDimensionPicker({ paramName: 'tag_value', elementId: 'tag-value-picker', persist: true });
 
 function updatePlaceholderVisibility(): void {
   const placeholder = document.querySelector<HTMLElement>('#tags-placeholder');
@@ -167,8 +174,6 @@ async function onSourceChange(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
-  initDateRangeDefaults();
-  initStatusBar();
 
   keyPicker.init((value) => {
     void onKeyChange(value);
@@ -182,6 +187,11 @@ async function bootstrap(): Promise<void> {
   valuePicker.init(updatePlaceholderVisibility);
 
   await initSourcePicker(onSourceChange);
+  initPageFilters(['services', 'accounts']);
+  // KPI summary, trend, breakdowns' shared summary + one per chart, top resources.
+  const queries: PageQueries = { current: 4 + TAG_BREAKDOWNS.length, compare: 0 };
+  installCostGuard(queries);
+  void checkInitialLoad(queries);
 
   setLoadingIndicatorVisible(true);
   try {

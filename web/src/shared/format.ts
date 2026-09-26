@@ -32,16 +32,23 @@ export function formatCurrency(value: number, currency: string): string {
   }
 }
 
+/**
+ * Short currency label for chart axes and bar labels ("$1.2K"). Sub-unit
+ * amounts keep two significant digits ("$0.004") rather than rounding to
+ * "$0" — otherwise a trend of fractions of a cent labels every tick "$0" /
+ * "-$0". Negative zero is normalized so a zero tick never reads "-$0".
+ */
 export function formatCurrencyCompact(value: number, currency: string): string {
+  const v = value === 0 ? 0 : value;
+  const small = Math.abs(v) < 1;
   try {
     return new Intl.NumberFormat(undefined, {
       style: 'currency',
       currency,
-      notation: 'compact',
-      maximumFractionDigits: 1,
-    }).format(value);
+      ...(small ? { maximumSignificantDigits: 2 } : { notation: 'compact', maximumFractionDigits: 1 }),
+    }).format(v);
   } catch {
-    return `${value.toFixed(0)} ${sanitizeCurrencyForFallback(currency)}`.trimEnd();
+    return `${small ? v.toPrecision(2) : v.toFixed(0)} ${sanitizeCurrencyForFallback(currency)}`.trimEnd();
   }
 }
 

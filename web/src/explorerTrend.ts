@@ -10,8 +10,9 @@
  * when `group_by` is set (`TimeSeriesPoint.group: string | null`). This
  * module pivots that flat point list into one ECharts series per distinct
  * group, applies the page's Top N control (`#top-n-input`) by ranking groups
- * by their total across the whole date range, and folds every group outside
- * the top N into a single "Other" series (summed per period). A `null`
+ * by their total across the whole date range (capped at the palette size,
+ * `MAX_SERIES`), and folds every other group into a single neutral "Other"
+ * series (summed per period). A `null`
  * group key is labeled "(none)" via the shared `formatKeyLabel` helper
  * (same convention as the Overview page's `topBreakdown.ts`).
  *
@@ -25,12 +26,13 @@
 
 import { getTimeseries, type TimeSeriesPoint } from './api.ts';
 import { addDaysIso, daysBetweenIso } from './shared/dates.ts';
-import { formatCurrency, formatCurrencyCompact, errorMessage } from './shared/format.ts';
-import { escapeHtml } from './shared/html.ts';
+import { errorMessage } from './shared/format.ts';
 import { formatKeyLabel } from './shared/labels.ts';
-import { autoGranularity, formatPeriodLabel } from './shared/granularity.ts';
+import { autoGranularity } from './shared/granularity.ts';
+import { buildStackedTrendOption, type StackedSeries } from './shared/trendOptions.ts';
+import { assignStableSlots, chartColors, MAX_SERIES } from './shared/chartTheme.ts';
 import { readExplorerControls, subscribeToControls, type ExplorerControls } from './shared/controls.ts';
-import { clearOverlays, showOverlay, ensureChart } from './shared/chart.ts';
+import { clearOverlays, showOverlay, setChartOption, initChartTypeToggle, showChartLoading, type ChartType } from './shared/chart.ts';
 import { RequestGuard } from './shared/requestGuard.ts';
 
 const CONTAINER_ID = 'explorer-trend';
@@ -59,6 +61,7 @@ async function loadTrendChart(
   if (!container) return;
 
   clearOverlays(container);
+  showChartLoading(container);
 
   const start = controls.startIso;
   const end = addDaysIso(controls.endIsoInclusive, 1);
@@ -82,22 +85,22 @@ async function loadTrendChart(
     }
 
     onCurrency?.(result.currency);
-    renderChart(container, result.series, result.currency, granularity, controls.topN);
+    renderChart(container, result.series, result.currency, granularity, controls.topN, controls.dimension);
   } catch (err) {
     if (!refreshGuard.isCurrent(token)) return;
     showOverlay(CONTAINER_ID, container, 'chart-error', errorMessage(err));
   }
 }
 
-interface EChartsSeries {
-  name: string;
-  type: 'line';
-  stack: 'total';
-  areaStyle: Record<string, never>;
-  showSymbol: false;
-  emphasis: { focus: 'series' };
-  data: number[];
-}
+/**
+ * Group key → palette slot, kept for the page's lifetime so a group keeps
+ * its color across refreshes (color follows the entity, not its rank).
+ * Keyed per dimension: "EC2" as a service and as a resource are unrelated.
+ */
+const slotMemory = new Map<string, number>();
+
+/** Line/Bar toggle (`#explorer-chart-type`); set up in `initExplorerTrendChart`. */
+let getChartType: () => ChartType = () => 'line';
 
 function renderChart(
   container: HTMLElement,
@@ -105,26 +108,27 @@ function renderChart(
   currency: string,
   granularity: ReturnType<typeof autoGranularity>,
   topN: number,
+  dimension: string,
 ): void {
-  const instance = ensureChart(CONTAINER_ID, container);
-
   // Distinct periods across the whole response, sorted chronologically —
   // the shared x-axis every group's series is pivoted onto.
   const periods = Array.from(new Set(points.map((p) => p.period))).sort((a, b) => a.localeCompare(b));
   const periodIndex = new Map(periods.map((period, idx) => [period, idx]));
 
   // Rank groups by their TOTAL across the whole date range (not per-period),
-  // per the plan's Top N rule.
+  // per the plan's Top N rule. The chart shows at most one palette's worth
+  // of named groups (never a generated 9th hue); the rest fold into "Other".
+  // The table below still lists the full Top N.
   const groupTotals = new Map<string | null, number>();
   for (const point of points) {
     groupTotals.set(point.group, (groupTotals.get(point.group) ?? 0) + point.total);
   }
   const rankedGroups = Array.from(groupTotals.entries()).sort((a, b) => b[1] - a[1]);
-  const topGroups = rankedGroups.slice(0, topN).map(([group]) => group);
+  const topGroups = rankedGroups.slice(0, Math.min(topN, MAX_SERIES)).map(([group]) => group);
   const topGroupSet = new Set(topGroups);
 
-  // Pivot: one zero-filled array per top-N group, plus a shared "Other"
-  // array aggregating every non-top-N group's total per period.
+  // Pivot: one zero-filled array per top group, plus a shared "Other"
+  // array aggregating every other group's total per period.
   const seriesData = new Map<string | null, number[]>();
   for (const group of topGroups) seriesData.set(group, new Array<number>(periods.length).fill(0));
   const otherData = new Array<number>(periods.length).fill(0);
@@ -141,81 +145,21 @@ function renderChart(
     }
   }
 
-  const categories = periods.map((period) => formatPeriodLabel(period, granularity));
-
-  const series: EChartsSeries[] = topGroups.map((group) => ({
-    name: formatKeyLabel(group),
-    type: 'line',
-    stack: 'total',
-    areaStyle: {},
-    showSymbol: false,
-    emphasis: { focus: 'series' },
-    data: seriesData.get(group) ?? [],
-  }));
-
-  if (hasOther) {
-    series.push({
-      name: OTHER_LABEL,
-      type: 'line',
-      stack: 'total',
-      areaStyle: {},
-      showSymbol: false,
-      emphasis: { focus: 'series' },
-      data: otherData,
-    });
-  }
-
-  instance.setOption(
-    {
-      tooltip: {
-        trigger: 'axis',
-        formatter: (params: unknown) => {
-          const items = Array.isArray(params) ? params : [params];
-          if (items.length === 0) return '';
-          const first = items[0] as { axisValueLabel?: string; name?: string } | undefined;
-          const axisLabel = first?.axisValueLabel ?? first?.name ?? '';
-          // Series names trace back to `TimeSeriesPoint.group`, i.e. real
-          // cost-data values (service/account/resource/tag names etc.) —
-          // escape before interpolating into the HTML the tooltip formatter
-          // returns (ECharts' default `renderMode: 'html'` does not escape
-          // it for us).
-          const lines = [`<strong>${escapeHtml(String(axisLabel))}</strong>`];
-          for (const raw of items) {
-            const item = raw as { seriesName?: string; value?: unknown };
-            const seriesName = escapeHtml(String(item.seriesName ?? ''));
-            const value = typeof item.value === 'number' ? item.value : 0;
-            lines.push(`${seriesName}: ${formatCurrency(value, currency)}`);
-          }
-          return lines.join('<br/>');
-        },
-      },
-      legend: {
-        type: 'scroll',
-        bottom: 0,
-        data: series.map((s) => s.name),
-      },
-      grid: {
-        left: 8,
-        right: 16,
-        top: 24,
-        bottom: 40,
-        containLabel: true,
-      },
-      xAxis: {
-        type: 'category',
-        data: categories,
-        boundaryGap: false,
-      },
-      yAxis: {
-        type: 'value',
-        axisLabel: {
-          formatter: (value: number) => formatCurrencyCompact(value, currency),
-        },
-      },
-      series,
-    },
-    true,
+  const slots = assignStableSlots(
+    topGroups.map((g) => `${dimension}|${g ?? ''}`),
+    slotMemory,
   );
+
+  setChartOption(CONTAINER_ID, container, () => {
+    const c = chartColors();
+    const series: StackedSeries[] = topGroups.map((group, i) => ({
+      name: formatKeyLabel(group),
+      data: seriesData.get(group) ?? [],
+      color: c.series[slots[i]],
+    }));
+    if (hasOther) series.push({ name: OTHER_LABEL, data: otherData, color: c.other });
+    return buildStackedTrendOption({ periods, series, currency, granularity, chartType: getChartType() });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +169,8 @@ function renderChart(
 export function initExplorerTrendChart(onCurrency?: (currency: string) => void): Promise<void> {
   const container = getContainer();
   if (!container) return Promise.resolve();
+
+  getChartType = initChartTypeToggle('explorer-chart-type', CONTAINER_ID);
 
   const refresh = async (): Promise<void> => {
     const controls = readExplorerControls();

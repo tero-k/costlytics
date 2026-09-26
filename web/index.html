@@ -6,52 +6,8 @@
     <title>Costlytics</title>
   </head>
   <body>
-    <div id="app">
-      <header class="app-header">
-        <h1>Costlytics</h1>
-        <nav class="app-nav">
-          <a href="/" class="active">Overview</a>
-          <a href="/explorer.html">Cost Explorer</a>
-          <a href="/service-detail.html">Service Detail</a>
-          <a href="/account-detail.html">Account Detail</a>
-          <a href="/cost-changes.html">Cost Changes</a>
-          <a href="/tags.html">Tags</a>
-          <a href="/settings.html">Settings</a>
-        </nav>
-        <div class="controls">
-          <label class="control">
-            <span>Source</span>
-            <select id="source-picker">
-              <option value="" selected>Loading sources&hellip;</option>
-            </select>
-          </label>
-          <label class="control">
-            <span>From</span>
-            <input type="date" id="date-start" />
-          </label>
-          <label class="control">
-            <span>To</span>
-            <input type="date" id="date-end" />
-          </label>
-          <label class="control">
-            <span>Metric</span>
-            <select id="metric-select">
-              <option value="amortized" selected>Amortized</option>
-              <option value="billed">Billed</option>
-              <option value="list">List</option>
-              <option value="contracted">Contracted</option>
-            </select>
-          </label>
-        </div>
-      </header>
-      <div class="status-bar" id="status-bar">
-        <span class="status-item" id="status-range"></span>
-        <span class="status-sep">&middot;</span>
-        <span class="status-item" id="status-metric"></span>
-        <span class="status-sep">&middot;</span>
-        <span class="status-item" id="status-currency">Currency: &hellip;</span>
-        <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
-      </div>
+    <!-- Sidebar, header, shared Source/From/To/Metric controls and status bar are rendered by src/shared/appShell.ts. -->
+    <div id="app" data-page="overview">
       <main>
         <section class="empty-state" id="no-sources" hidden>
           <h2>No data sources yet</h2>
@@ -64,29 +20,35 @@
           <a class="button-primary" href="/settings.html">Open Settings</a>
         </section>
         <div id="overview"></div>
-        <section class="chart-section">
+        <section class="chart-section card">
           <div class="chart-header">
             <h2>Cost trend</h2>
-            <label class="control">
-              <span>Granularity</span>
-              <select id="granularity-select">
-                <option value="auto" selected>Auto</option>
-                <option value="day">Day</option>
-                <option value="month">Month</option>
-                <option value="year">Year</option>
-              </select>
-            </label>
+            <div class="chart-tools">
+              <div class="segmented" id="trend-chart-type" role="group" aria-label="Chart type">
+                <button type="button" class="active" data-chart-type="line">Line</button>
+                <button type="button" data-chart-type="bar">Bar</button>
+              </div>
+              <label class="control control-inline">
+                <span>Granularity</span>
+                <select id="granularity-select">
+                  <option value="auto" selected>Auto</option>
+                  <option value="day">Day</option>
+                  <option value="month">Month</option>
+                  <option value="year">Year</option>
+                </select>
+              </label>
+            </div>
           </div>
           <div class="chart-area" id="trend-chart"></div>
         </section>
         <section class="top-breakdown-grid">
-          <div class="chart-section">
+          <div class="chart-section card">
             <div class="chart-header">
               <h2>Top services</h2>
             </div>
             <div class="chart-area" id="top-services"></div>
           </div>
-          <div class="chart-section">
+          <div class="chart-section card">
             <div class="chart-header">
               <h2>Top accounts</h2>
             </div>

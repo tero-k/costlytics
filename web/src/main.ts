@@ -1,14 +1,17 @@
 import './style.css';
 import { initKpiCards } from './kpiCards.ts';
 import { initTrendChart } from './trendChart.ts';
+import { setKpiCredits, setKpiSparkline } from './shared/kpiCard.ts';
+import { formatCurrency } from './shared/format.ts';
 import { initTopBreakdownCharts } from './topBreakdown.ts';
 import {
-  initDateRangeDefaults,
-  initStatusBar,
   setLoadingIndicatorVisible,
   updateStatusCurrency,
 } from './shared/statusBar.ts';
+import { initAppShell } from './shared/appShell.ts';
+import { initPageFilters } from './shared/pageFilters.ts';
 import { initSourcePicker } from './shared/sourcePicker.ts';
+import { checkInitialLoad, installCostGuard, type PageQueries } from './shared/costGuard.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Overview page.
@@ -26,7 +29,7 @@ import { initSourcePicker } from './shared/sourcePicker.ts';
  * an initial-load indicator, and a persistent status bar (plan §57's UX
  * rule — a dashboard must always show its active date range, cost metric,
  * and currency, not just bury them inside individual cards). The status
- * bar / date-default wiring itself lives in `shared/statusBar.ts` since the
+ * bar / shared-control wiring itself lives in `shared/appShell.ts` since the
  * Cost Explorer page (`explorerMain.ts`) needs the same behavior.
  */
 
@@ -34,9 +37,11 @@ import { initSourcePicker } from './shared/sourcePicker.ts';
 // Bootstrap
 // ---------------------------------------------------------------------------
 
+/** One refresh: KPI summary + compare, top-breakdown summary + 2 charts, trend. */
+const OVERVIEW_QUERIES: PageQueries = { current: 5, compare: 1 };
+
 async function bootstrap(): Promise<void> {
-  initDateRangeDefaults();
-  initStatusBar();
+  initAppShell();
   // Must resolve before any component's first fetch fires (see
   // `shared/sourcePicker.ts`'s doc comment) — awaited here, ahead of the
   // `Promise.allSettled` below.
@@ -50,6 +55,9 @@ async function bootstrap(): Promise<void> {
     document.querySelector<HTMLElement>(emptyStateId)?.removeAttribute('hidden');
     return;
   }
+  initPageFilters(['services', 'accounts']);
+  installCostGuard(OVERVIEW_QUERIES);
+  void checkInitialLoad(OVERVIEW_QUERIES);
 
   setLoadingIndicatorVisible(true);
   try {
@@ -67,7 +75,12 @@ async function bootstrap(): Promise<void> {
     // multi-currency data while `timeseries()`/`breakdown()` still succeed).
     await Promise.allSettled([
       initKpiCards(updateStatusCurrency),
-      initTrendChart(updateStatusCurrency),
+      // The trend's series doubles as the "Selected period" card's
+      // sparkline and the credits card (no extra query).
+      initTrendChart(updateStatusCurrency, (split, currency) => {
+        setKpiSparkline('kpi-current', split?.net ?? []);
+        setKpiCredits('kpi-credits', split?.totals ?? null, (v) => formatCurrency(v, currency));
+      }),
       initTopBreakdownCharts(updateStatusCurrency),
     ]);
   } finally {

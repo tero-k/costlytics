@@ -30,6 +30,8 @@ import { renderKpiShell, setKpiLoading, setKpiError, setKpiValue, type KpiCardDe
 
 const CARD_DEFS: KpiCardDef[] = [
   { id: 'kpi-current', label: 'Selected period' },
+  // Filled by the trend chart (`main.ts`); hidden unless the period has credits.
+  { id: 'kpi-credits', label: 'Credits & discounts', hidden: true },
   { id: 'kpi-previous', label: 'Previous period' },
   { id: 'kpi-change', label: 'Change' },
   { id: 'kpi-mtd', label: 'Month to date' },
@@ -94,12 +96,24 @@ async function loadCompareCards(
     }
 
     onCurrency?.(result.currency);
-    setKpiValue('kpi-current', formatCurrency(row.current, result.currency));
+    setKpiValue('kpi-current', formatCurrency(row.current, result.currency), {
+      sub: row.percentage_change === null ? undefined : 'vs previous period',
+      pill:
+        row.percentage_change === null
+          ? undefined
+          : { text: formatPercent(row.percentage_change), tone: changeClass(row.absolute_change) },
+    });
     setKpiValue('kpi-previous', formatCurrency(row.previous, result.currency));
 
     const changeValue = formatSignedCurrency(row.absolute_change, result.currency);
-    const changePct = row.percentage_change === null ? 'N/A' : formatPercent(row.percentage_change);
-    setKpiValue('kpi-change', `${changeValue} (${changePct})`, { cardClass: changeClass(row.absolute_change) });
+    setKpiValue('kpi-change', changeValue, {
+      cardClass: changeClass(row.absolute_change),
+      sub: row.percentage_change === null ? 'No previous-period cost to compare' : undefined,
+      pill:
+        row.percentage_change === null
+          ? undefined
+          : { text: formatPercent(row.percentage_change), tone: changeClass(row.absolute_change) },
+    });
   } catch (err) {
     if (!refreshGuard.isCurrent(token)) return;
     const message = errorMessage(err);

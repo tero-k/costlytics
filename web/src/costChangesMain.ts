@@ -1,5 +1,7 @@
 import './style.css';
-import { initDateRangeDefaults, initStatusBar, setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { setLoadingIndicatorVisible, updateStatusCurrency } from './shared/statusBar.ts';
+import { initAppShell } from './shared/appShell.ts';
+import { initPageFilters } from './shared/pageFilters.ts';
 import { addDaysIso, previousPeriod } from './shared/dates.ts';
 import { readChangesControls, subscribeToControls } from './shared/controls.ts';
 import { toCsv, downloadTextFile } from './shared/csv.ts';
@@ -7,6 +9,7 @@ import { initChangesSummary } from './costChangesSummary.ts';
 import { initChangesMovers } from './costChangesMovers.ts';
 import { initChangesTable, getExportTableData } from './costChangesTable.ts';
 import { initSourcePicker } from './shared/sourcePicker.ts';
+import { checkInitialLoad, installCostGuard, type PageQueries } from './shared/costGuard.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Cost Changes page.
@@ -21,7 +24,7 @@ import { initSourcePicker } from './shared/sourcePicker.ts';
  * On first load there is no persisted state to restore (no URL/localStorage
  * layer for this page — kept simple per the task plan), so the current
  * period defaults the same way every other page does
- * (`initDateRangeDefaults()`, "current month to date") and the previous
+ * (`appState.ts`: last used range, else "current month to date") and the previous
  * period defaults to the immediately-preceding period of the same length
  * (`previousPeriod()`), giving a sensible starting comparison that the user
  * can then override on either side independently.
@@ -91,12 +94,17 @@ function initPreviousPeriodDefaults(): void {
   prevEndInput.value = addDaysIso(previous.end, -1);
 }
 
+/** One refresh: summary cards, movers and table, each a compare. */
+const CHANGES_QUERIES: PageQueries = { current: 0, compare: 3 };
+
 async function bootstrap(): Promise<void> {
-  initDateRangeDefaults();
+  initAppShell();
   initPreviousPeriodDefaults();
-  initStatusBar();
   initCsvExport();
   await initSourcePicker();
+  initPageFilters(['services', 'accounts']);
+  installCostGuard(CHANGES_QUERIES);
+  void checkInitialLoad(CHANGES_QUERIES);
   subscribeToControls(refresh, { changes: true });
 
   setLoadingIndicatorVisible(true);

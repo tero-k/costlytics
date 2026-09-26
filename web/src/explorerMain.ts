@@ -1,15 +1,16 @@
 import './style.css';
 import {
-  initDateRangeDefaults,
-  initStatusBar,
   setLoadingIndicatorVisible,
   updateStatusCurrency,
 } from './shared/statusBar.ts';
+import { initAppShell } from './shared/appShell.ts';
+import { initPageFilters } from './shared/pageFilters.ts';
 import { initExplorerTrendChart } from './explorerTrend.ts';
 import { initExplorerTable, getExportTableData } from './explorerTable.ts';
 import { toCsv, downloadTextFile } from './shared/csv.ts';
 import { readExplorerControls } from './shared/controls.ts';
 import { initSourcePicker } from './shared/sourcePicker.ts';
+import { checkInitialLoad, installCostGuard, type PageQueries } from './shared/costGuard.ts';
 
 /**
  * App shell / orchestrator for the Costlytics Cost Explorer page.
@@ -57,11 +58,16 @@ function initCsvExport(): void {
   });
 }
 
+/** One refresh: the trend chart plus the current-vs-previous table. */
+const EXPLORER_QUERIES: PageQueries = { current: 1, compare: 1 };
+
 async function bootstrap(): Promise<void> {
-  initDateRangeDefaults();
-  initStatusBar();
+  initAppShell();
   initCsvExport();
   await initSourcePicker();
+  initPageFilters(['services', 'accounts']);
+  installCostGuard(EXPLORER_QUERIES);
+  void checkInitialLoad(EXPLORER_QUERIES);
 
   setLoadingIndicatorVisible(true);
   try {

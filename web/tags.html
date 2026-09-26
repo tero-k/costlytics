@@ -6,63 +6,21 @@
     <title>Costlytics — Tags</title>
   </head>
   <body>
-    <div id="app">
-      <header class="app-header">
-        <h1>Costlytics</h1>
-        <nav class="app-nav">
-          <a href="/">Overview</a>
-          <a href="/explorer.html">Cost Explorer</a>
-          <a href="/service-detail.html">Service Detail</a>
-          <a href="/account-detail.html">Account Detail</a>
-          <a href="/cost-changes.html">Cost Changes</a>
-          <a href="/tags.html" class="active">Tags</a>
-          <a href="/settings.html">Settings</a>
-        </nav>
-        <div class="controls">
-          <label class="control">
-            <span>Source</span>
-            <select id="source-picker">
-              <option value="" selected>Loading sources&hellip;</option>
-            </select>
-          </label>
-          <label class="control">
-            <span>Tag key</span>
-            <select id="tag-key-picker">
-              <option value="" selected>Select a tag key&hellip;</option>
-            </select>
-          </label>
-          <label class="control">
-            <span>Tag value</span>
-            <select id="tag-value-picker">
-              <option value="" selected>Select a tag value&hellip;</option>
-            </select>
-          </label>
-          <label class="control">
-            <span>From</span>
-            <input type="date" id="date-start" />
-          </label>
-          <label class="control">
-            <span>To</span>
-            <input type="date" id="date-end" />
-          </label>
-          <label class="control">
-            <span>Metric</span>
-            <select id="metric-select">
-              <option value="amortized" selected>Amortized</option>
-              <option value="billed">Billed</option>
-              <option value="list">List</option>
-              <option value="contracted">Contracted</option>
-            </select>
-          </label>
-        </div>
-      </header>
-      <div class="status-bar" id="status-bar">
-        <span class="status-item" id="status-range"></span>
-        <span class="status-sep">&middot;</span>
-        <span class="status-item" id="status-metric"></span>
-        <span class="status-sep">&middot;</span>
-        <span class="status-item" id="status-currency">Currency: &hellip;</span>
-        <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
+    <!-- Sidebar, header, shared Source/From/To/Metric controls and status bar are rendered by src/shared/appShell.ts. -->
+    <div id="app" data-page="tags">
+      <div class="controls page-controls">
+        <label class="control">
+          <span>Tag key</span>
+          <select id="tag-key-picker">
+            <option value="" selected>Select a tag key&hellip;</option>
+          </select>
+        </label>
+        <label class="control">
+          <span>Tag value</span>
+          <select id="tag-value-picker">
+            <option value="" selected>Select a tag value&hellip;</option>
+          </select>
+        </label>
       </div>
       <main>
         <div class="table-status" id="tags-placeholder">Select a tag key and value to view details.</div>

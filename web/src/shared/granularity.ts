@@ -29,3 +29,38 @@ export function formatPeriodLabel(periodIso: string, granularity: TimeGranularit
       return new Intl.DateTimeFormat(undefined, { year: 'numeric', timeZone: 'UTC' }).format(date);
   }
 }
+
+/**
+ * Indices into a chronologically sorted `periods` list where the UTC year
+ * changes — where a trend chart draws its year marker. Never index 0 (the
+ * first point has nothing to separate), and none at `year` granularity
+ * (every point is its own year already).
+ */
+export function yearBoundaryIndices(periods: string[], granularity: TimeGranularity): number[] {
+  if (granularity === 'year') return [];
+  const indices: number[] = [];
+  let previousYear: number | null = null;
+  periods.forEach((period, i) => {
+    const date = new Date(period);
+    if (Number.isNaN(date.getTime())) return;
+    const year = date.getUTCFullYear();
+    if (previousYear !== null && year !== previousYear) indices.push(i);
+    previousYear = year;
+  });
+  return indices;
+}
+
+/**
+ * Compact x-axis label: the year appears only where it's news — on the
+ * first point and on each year boundary ("Jan 2025", "Jan 1, 2025") —
+ * and is dropped elsewhere ("Feb", "Feb 3"), since the year markers
+ * already carry it. Tooltips keep the full `formatPeriodLabel`.
+ */
+export function formatAxisLabel(periodIso: string, granularity: TimeGranularity, withYear: boolean): string {
+  const date = new Date(periodIso);
+  if (Number.isNaN(date.getTime()) || granularity === 'year') return formatPeriodLabel(periodIso, granularity);
+  const opts: Intl.DateTimeFormatOptions =
+    granularity === 'day' ? { month: 'short', day: 'numeric', timeZone: 'UTC' } : { month: 'short', timeZone: 'UTC' };
+  if (withYear) opts.year = 'numeric';
+  return new Intl.DateTimeFormat(undefined, opts).format(date);
+}

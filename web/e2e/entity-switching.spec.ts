@@ -256,9 +256,12 @@ test('Tags: source and tag-key/value switches stay flat, correct, and never dupl
   await assertNoErrorState(page);
 
   // --- Source switches: local-cur2 has NO tag keys at all for this fixture ---
+  // Back on local-demo, the last key/value picked on this page (Team/Data,
+  // remembered in localStorage by `dimensionPicker.ts`) is restored rather
+  // than resetting to the alphabetically first key.
   const sourceSwitches: Array<{ source: string; expectedKey: string | null; expectedValue: string | null }> = [
     { source: 'local-cur2', expectedKey: null, expectedValue: null },
-    { source: 'local-demo', expectedKey: 'Environment', expectedValue: 'development' },
+    { source: 'local-demo', expectedKey: 'Team', expectedValue: 'Data' },
     { source: 'local-cur2', expectedKey: null, expectedValue: null },
   ];
 

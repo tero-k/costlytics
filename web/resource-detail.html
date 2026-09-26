@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Costlytics — Resources</title>
+  </head>
+  <body>
+    <!-- Sidebar, header, shared Source/From/To/Metric controls and status bar are rendered by src/shared/appShell.ts. -->
+    <div id="app" data-page="resource-detail">
+      <div class="controls page-controls">
+        <div class="control search-picker" id="resource-search">
+          <label for="resource-search-input">Resource</label>
+          <input
+            type="search"
+            id="resource-search-input"
+            placeholder="Search resource ID&hellip;"
+            autocomplete="off"
+            role="combobox"
+            aria-expanded="false"
+            aria-controls="resource-search-results"
+          />
+          <ul class="search-results" id="resource-search-results" role="listbox" hidden></ul>
+        </div>
+      </div>
+      <main>
+        <div id="resource-browse-top-resources"></div>
+        <div id="resource-selected" class="stack" hidden>
+          <div class="selected-entity card">
+            <div>
+              <div class="muted">Resource</div>
+              <div class="selected-entity-id" id="resource-selected-id"></div>
+            </div>
+            <button type="button" id="resource-clear">Back to top resources</button>
+          </div>
+          <div id="resource-kpi"></div>
+          <div id="resource-trend"></div>
+          <div id="resource-by-category"></div>
+          <div id="resource-by-pricing"></div>
+          <div id="resource-by-region"></div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/resourceDetailMain.ts"></script>
+  </body>
+</html>

@@ -6,19 +6,8 @@
     <title>Costlytics — Settings</title>
   </head>
   <body>
-    <div id="app">
-      <header class="app-header">
-        <h1>Costlytics</h1>
-        <nav class="app-nav">
-          <a href="/">Overview</a>
-          <a href="/explorer.html">Cost Explorer</a>
-          <a href="/service-detail.html">Service Detail</a>
-          <a href="/account-detail.html">Account Detail</a>
-          <a href="/cost-changes.html">Cost Changes</a>
-          <a href="/tags.html">Tags</a>
-          <a href="/settings.html" class="active">Settings</a>
-        </nav>
-      </header>
+    <!-- Sidebar and header are rendered by src/shared/appShell.ts. -->
+    <div id="app" data-page="settings" data-shared="false">
       <div class="status-bar" id="status-bar">
         <span class="status-item" id="status-source-count"></span>
         <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
@@ -75,6 +64,26 @@
               <button type="button" id="f-cancel">Cancel</button>
             </div>
             <div id="source-test-result" class="form-result" role="status"></div>
+          </form>
+        </section>
+        <section class="chart-section" id="cost-guard-section">
+          <div class="chart-header"><h2>Cost guard</h2></div>
+          <form id="cost-guard-form" class="settings-form" novalidate>
+            <label class="control"><span>Warn about S3 read costs</span>
+              <select id="cg-enabled"><option value="true">On</option><option value="false">Off</option></select>
+            </label>
+            <label class="control"><span>Banner above (USD per page load)</span><input id="cg-soft" type="number" min="0" step="0.01" /></label>
+            <label class="control"><span>Ask to confirm above (USD per page load)</span><input id="cg-hard" type="number" min="0" step="0.01" /></label>
+            <label class="control"><span>S3 egress (USD per GB)</span><input id="cg-egress" type="number" min="0" step="0.001" /></label>
+            <label class="control"><span>S3 GET (USD per 1,000 requests)</span><input id="cg-get" type="number" min="0" step="0.0001" /></label>
+            <p class="form-hint">
+              Before a date range change, Costlytics estimates what the page&rsquo;s queries would download from S3 and
+              what that costs at these rates. The estimate ignores the AWS free allowance. Local folders never warn.
+            </p>
+            <div class="form-actions">
+              <button type="submit" class="button-primary" id="cg-save">Save cost guard</button>
+            </div>
+            <div id="cost-guard-result" class="form-result" role="status"></div>
           </form>
         </section>
       </main>

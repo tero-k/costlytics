@@ -24,5 +24,6 @@ void bootstrapEntityDetailPage({
   buildFilter: (selected) => ({ services: [selected] }),
   entityNoun: 'service',
   idPrefix: 'service',
+  pageFilters: ['accounts'],
   breakdowns: SERVICE_BREAKDOWNS,
 });

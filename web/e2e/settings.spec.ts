@@ -14,7 +14,7 @@ test('add, test, save and delete a local-folder source', async ({ page }) => {
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.locator('#source-test-result')).toContainText('focus12');
 
-  await page.getByRole('button', { name: 'Save' }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   const row = page.locator('#sources-table tr[data-id="e2e-focus-copy"]');
   await expect(row).toContainText('Registered');
 
@@ -33,7 +33,7 @@ test('invalid S3 URI is rejected with a readable error', async ({ page }) => {
   await page.getByRole('button', { name: 'Add source' }).click();
   await page.getByLabel('Name').fill('Bad');
   await page.getByLabel('S3 URI').fill('s3://');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('#source-test-result')).toContainText('S3 URI must include a bucket');
 });
 
@@ -49,4 +49,17 @@ test('a failed Reload surfaces its error in the page-level message', async ({ pa
   const row = page.locator('#sources-table tr[data-id="local-demo"]');
   await row.getByRole('button', { name: 'Reload' }).click();
   await expect(page.locator('#sources-message')).toContainText('boom');
+});
+
+// Cost guard settings are validated server-side. Only the rejected path is
+// exercised here: a successful save would change the limits every parallel
+// spec's pages read.
+test('cost guard rejects a confirm limit below the banner limit', async ({ page }) => {
+  await page.goto('/settings.html');
+  await expect(page.locator('#cg-soft')).toHaveValue('0.1');
+  await expect(page.locator('#cg-hard')).toHaveValue('1');
+
+  await page.locator('#cg-soft').fill('5');
+  await page.getByRole('button', { name: 'Save cost guard' }).click();
+  await expect(page.locator('#cost-guard-result')).toContainText('hard limit must be at least the soft limit');
 });
