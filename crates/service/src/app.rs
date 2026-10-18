@@ -1,11 +1,15 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-use data::config::{AppConfig, CostGuardConfig, DataSource, S3AuthConfig};
+use chrono::{Duration, Utc};
+use data::config::{AnomalyConfig, AppConfig, CostGuardConfig, DataSource, S3AuthConfig};
+use domain::anomaly::ScopeKind;
 use serde::{Deserialize, Serialize};
 
+use crate::alerts::{AlertStore, Anomaly, RunState};
 use crate::cost::{self, EstimateRequest, EstimateResponse};
 use crate::error::ServiceError;
+use crate::monitor::{CheckContext, CheckMode, CheckResult, Monitor};
 use crate::register::register_source;
 use crate::registry::SourceRegistry;
 use crate::secrets::SecretStore;
@@ -23,6 +27,54 @@ pub struct SourceSettings {
 pub struct SettingsResponse {
     pub sources: Vec<SourceSettings>,
     pub cost_guard: CostGuardConfig,
+    pub anomaly: AnomalyConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AnomaliesQuery {
+    /// Sent by the shared transport on every page; ignored, since the inbox spans all sources.
+    #[serde(default)]
+    pub source_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RunAnomaliesRequest {
+    /// `None` = every registered source.
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// The user confirmed a check whose scan reaches cost guard's hard limit.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnomalyIdRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MuteRequest {
+    /// Mutes are per source.
+    pub source_id: String,
+    pub scope_kind: ScopeKind,
+    pub scope_key: String,
+    pub days: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceRun {
+    pub source_id: String,
+    pub source_name: String,
+    pub run: Option<RunState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AnomaliesResponse {
+    pub enabled: bool,
+    /// Open and not muted: the sidebar badge.
+    pub open_count: usize,
+    pub anomalies: Vec<Anomaly>,
+    pub runs: Vec<SourceRun>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +143,9 @@ pub struct CostlyticsService {
     /// Dev/test harness only: estimate local sources as if they were S3, so
     /// the cost-warning flow can be exercised against local fixtures.
     treat_local_as_remote: bool,
+    /// The anomaly inbox (`alerts.json` next to `settings_path`; in memory without one).
+    alerts: AlertStore,
+    monitor: Monitor,
 }
 
 fn validate_source(s: &DataSource) -> Result<(), ServiceError> {
@@ -125,6 +180,10 @@ impl CostlyticsService {
         for source in &config.sources {
             registry.mark_pending(source);
         }
+        let alerts = settings_path
+            .as_ref()
+            .map(|p| AlertStore::open(p.with_file_name("alerts.json"), Utc::now().date_naive()))
+            .unwrap_or_else(AlertStore::in_memory);
         Self {
             registry,
             config: RwLock::new(config),
@@ -132,6 +191,8 @@ impl CostlyticsService {
             secrets,
             mutation: Mutex::new(()),
             treat_local_as_remote: false,
+            alerts,
+            monitor: Monitor::default(),
         }
     }
 
@@ -234,8 +295,8 @@ impl CostlyticsService {
     }
 
     pub fn settings(&self) -> SettingsResponse {
-        let sources = self
-            .config()
+        let config = self.config();
+        let sources = config
             .sources
             .into_iter()
             .map(|source| {
@@ -244,7 +305,127 @@ impl CostlyticsService {
                 SourceSettings { source, has_secret }
             })
             .collect();
-        SettingsResponse { sources, cost_guard: self.config().cost_guard }
+        SettingsResponse { sources, cost_guard: config.cost_guard.clone(), anomaly: config.anomaly }
+    }
+
+    fn registered_ids(&self) -> Vec<String> {
+        self.registry
+            .diagnostics()
+            .into_iter()
+            .filter(|d| matches!(d.status, crate::registry::SourceStatus::Registered { .. }))
+            .map(|d| d.id)
+            .collect()
+    }
+
+    fn check(&self, id: &str, mode: CheckMode) -> CheckResult {
+        let config = self.config();
+        let ctx = CheckContext {
+            registry: &self.registry,
+            guard: &config.cost_guard,
+            config: &config.anomaly,
+            store: &self.alerts,
+            treat_local_as_remote: self.treat_local_as_remote,
+        };
+        let result = self.monitor.check(&ctx, id, mode, Utc::now());
+        tracing::info!(source_id = %id, outcome = ?result.outcome, "anomaly check");
+        result
+    }
+
+    /// Blocking: an automatic check of one source (skips unchanged data and hard-limit scans).
+    pub fn check_auto(&self, id: &str) -> CheckResult {
+        self.check(id, CheckMode::Auto)
+    }
+
+    /// Blocking: an automatic check of every registered source.
+    pub fn check_auto_all(&self) -> Vec<CheckResult> {
+        self.registered_ids().iter().map(|id| self.check_auto(id)).collect()
+    }
+
+    /// Blocking: "Check now".
+    pub fn run_anomaly_check(&self, req: RunAnomaliesRequest) -> Result<Vec<CheckResult>, ServiceError> {
+        let ids = match req.source_id {
+            Some(id) => {
+                self.entry(&id)?;
+                vec![id]
+            }
+            None => self.registered_ids(),
+        };
+        let mode = CheckMode::Manual { confirmed: req.confirm };
+        Ok(ids.iter().map(|id| self.check(id, mode)).collect())
+    }
+
+    /// The anomaly inbox across every source, most severe first.
+    pub fn anomalies(&self) -> AnomaliesResponse {
+        let config = self.config();
+        let state = self.alerts.snapshot(Utc::now().date_naive());
+        let mut anomalies = state.anomalies;
+        anomalies.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.last_day.cmp(&a.last_day)));
+        let open_count = anomalies
+            .iter()
+            .filter(|a| a.status == crate::alerts::AnomalyStatus::Open && !a.muted)
+            .count();
+        let runs = config
+            .sources
+            .iter()
+            .map(|s| SourceRun { source_id: s.id.clone(), source_name: s.name.clone(), run: state.runs.get(&s.id).cloned() })
+            .collect();
+        AnomaliesResponse { enabled: config.anomaly.enabled, open_count, anomalies, runs }
+    }
+
+    pub fn acknowledge_anomaly(&self, req: AnomalyIdRequest) -> Result<Anomaly, ServiceError> {
+        self.alerts.acknowledge(&req.id, Utc::now())
+    }
+
+    pub fn mute_anomaly_scope(&self, req: MuteRequest) -> Result<AnomaliesResponse, ServiceError> {
+        if !(1..=365).contains(&req.days) {
+            return Err(ServiceError::bad_request("days must be between 1 and 365"));
+        }
+        let key = req.scope_key.trim();
+        if key.is_empty() {
+            return Err(ServiceError::bad_request("scope_key is required"));
+        }
+        let source_id = req.source_id.trim();
+        if source_id.is_empty() {
+            return Err(ServiceError::bad_request("source_id is required"));
+        }
+        let today = Utc::now().date_naive();
+        self.alerts.mute(source_id, req.scope_kind, key, today + Duration::days(i64::from(req.days) - 1), today)?;
+        Ok(self.anomalies())
+    }
+
+    pub fn save_anomaly_config(&self, cfg: AnomalyConfig) -> Result<AnomalyConfig, ServiceError> {
+        cfg.validate().map_err(ServiceError::bad_request)?;
+        // See `save_source` for why the read-modify-write is serialized.
+        let _guard = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let mut config = self.config();
+        config.anomaly = cfg.clone();
+        self.persist(&config)?;
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+        Ok(cfg)
+    }
+
+    /// Desktop only: the periodic re-discovery + automatic check loop. Reads
+    /// `check_interval_hours` on every step, so a Settings change applies
+    /// without a restart. Never returns.
+    pub fn spawn_monitor(self: Arc<Self>) {
+        const STEP: std::time::Duration = std::time::Duration::from_secs(60);
+        std::thread::spawn(move || {
+            let mut last = std::time::Instant::now();
+            loop {
+                std::thread::sleep(STEP);
+                let interval = std::time::Duration::from_secs(u64::from(self.config().anomaly.check_interval_hours.max(1)) * 3600);
+                if last.elapsed() < interval {
+                    continue;
+                }
+                last = std::time::Instant::now();
+                for source in self.config().sources {
+                    if let Err(e) = self.refresh_source(&source.id) {
+                        tracing::warn!(source_id = %source.id, error = %e, "periodic source refresh failed");
+                    }
+                }
+                self.check_auto_all();
+            }
+        });
     }
 
     pub fn cost_estimate(&self, req: EstimateRequest) -> Result<EstimateResponse, ServiceError> {
@@ -357,6 +538,9 @@ impl CostlyticsService {
             tracing::warn!(source_id = %req.id, error = %e, "could not delete secret from keychain");
         }
         self.registry.remove(&req.id);
+        if let Err(e) = self.alerts.forget_source(&req.id) {
+            tracing::warn!(source_id = %req.id, error = %e, "could not drop the deleted source's anomalies");
+        }
         drop(_guard);
         Ok(self.sources())
     }
@@ -429,7 +613,8 @@ mod tests {
     use crate::error::ErrorKind;
     use crate::registry::SourceStatus;
     use crate::secrets::MemorySecretStore;
-    use data::config::{AppConfig, DataSource, S3AuthConfig};
+    use data::config::{AnomalyConfig, AppConfig, DataSource, S3AuthConfig};
+    use domain::anomaly::ScopeKind;
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -755,5 +940,71 @@ mod tests {
         let negative = CostGuardConfig { egress_usd_per_gb: -1.0, ..Default::default() };
         assert!(f.svc.save_cost_guard(negative).is_err());
         assert_eq!(f.svc.settings().cost_guard, guard, "rejected saves leave the settings untouched");
+    }
+
+    fn anomaly_fixture(f: &Fixture) -> String {
+        let dir = f._dir.path().join("anomaly");
+        data::fixtures::generate_anomaly_fixture(&dir, chrono::Utc::now().date_naive() - chrono::Duration::days(1)).unwrap();
+        dir.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn anomaly_inbox_flow_ack_mute_delete_and_persist() {
+        let f = fixture();
+        save(&f, local("an", &anomaly_fixture(&f)), None, true).unwrap();
+        let results = f.svc.run_anomaly_check(RunAnomaliesRequest { source_id: None, confirm: false }).unwrap();
+        assert!(matches!(results[0].outcome, crate::monitor::CheckOutcome::Ok { new_anomalies: 4, .. }), "{results:?}");
+
+        let inbox = f.svc.anomalies();
+        assert_eq!((inbox.anomalies.len(), inbox.open_count), (4, 4));
+        assert_eq!(inbox.runs[0].source_name, "Source an");
+        assert!(inbox.anomalies.windows(2).all(|w| w[0].severity >= w[1].severity));
+
+        let id = inbox.anomalies[0].id.clone();
+        f.svc.acknowledge_anomaly(AnomalyIdRequest { id }).unwrap();
+        assert_eq!(f.svc.anomalies().open_count, 3);
+
+        let muted = f.svc
+            .mute_anomaly_scope(MuteRequest {
+                source_id: "an".into(),
+                scope_kind: ScopeKind::Account,
+                scope_key: data::fixtures::ANOMALY_NEW_ACCOUNT.into(),
+                days: 7,
+            })
+            .unwrap();
+        assert!(muted.open_count <= 2);
+        let bad = MuteRequest { source_id: "an".into(), scope_kind: ScopeKind::Account, scope_key: "x".into(), days: 0 };
+        assert_eq!(f.svc.mute_anomaly_scope(bad).unwrap_err().kind, ErrorKind::BadRequest);
+        let no_source = MuteRequest { source_id: " ".into(), scope_kind: ScopeKind::Account, scope_key: "x".into(), days: 7 };
+        assert_eq!(f.svc.mute_anomaly_scope(no_source).unwrap_err().kind, ErrorKind::BadRequest);
+
+        // A fresh service over the same settings path sees the persisted inbox.
+        let again = CostlyticsService::new(AppConfig::default(), Some(f.settings_path.clone()), f.secrets.clone());
+        assert_eq!(again.anomalies().anomalies.len(), 4);
+
+        f.svc.delete_source(SourceIdRequest { id: "an".into() }).unwrap();
+        let after = f.svc.anomalies();
+        assert!(after.anomalies.is_empty() && after.runs.is_empty());
+    }
+
+    #[test]
+    fn auto_check_skips_unchanged_data() {
+        let f = fixture();
+        save(&f, local("an", &anomaly_fixture(&f)), None, true).unwrap();
+        assert!(matches!(f.svc.check_auto("an").outcome, crate::monitor::CheckOutcome::Ok { .. }));
+        assert_eq!(f.svc.check_auto("an").outcome, crate::monitor::CheckOutcome::Unchanged);
+        assert_eq!(f.svc.check_auto_all().len(), 1);
+    }
+
+    #[test]
+    fn save_anomaly_config_persists_and_validates() {
+        let f = fixture();
+        let cfg = AnomalyConfig { min_delta_usd: 50.0, ..Default::default() };
+        f.svc.save_anomaly_config(cfg.clone()).unwrap();
+        assert_eq!(f.svc.settings().anomaly, cfg);
+        assert_eq!(AppConfig::load(f.settings_path.to_str().unwrap()).unwrap().anomaly, cfg);
+        let err = f.svc.save_anomaly_config(AnomalyConfig { lookback_days: 3, ..Default::default() }).unwrap_err();
+        assert_eq!((err.kind, err.message.as_str()), (ErrorKind::BadRequest, "lookback_days must be between 14 and 90"));
+        assert_eq!(f.svc.settings().anomaly, cfg);
     }
 }
