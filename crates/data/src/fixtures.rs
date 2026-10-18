@@ -639,6 +639,148 @@ pub fn generate_demo_fixture(base_dir: &Path) -> Result<(), FixtureError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Anomaly fixture (FOCUS 1.2, daily rows, dates relative to `end_day`)
+// ---------------------------------------------------------------------------
+
+pub const ANOMALY_SPIKE_SERVICE: &str = "Amazon Elastic Compute Cloud";
+pub const ANOMALY_SPIKE_ACCOUNT: &str = "111111111111";
+pub const ANOMALY_NEW_SERVICE: &str = "Amazon SageMaker";
+pub const ANOMALY_NEW_ACCOUNT: &str = "333333333333";
+/// Billed once a month as a `Purchase`: must never fire (usage-only detection).
+pub const ANOMALY_SUPPORT_SERVICE: &str = "AWS Support (Business)";
+/// Days of data, ending on (and including) `end_day`.
+pub const ANOMALY_FIXTURE_DAYS: i64 = 60;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnomalyFixtureRow {
+    pub day: chrono::NaiveDate,
+    pub service: &'static str,
+    pub account: &'static str,
+    /// FOCUS `ChargeCategory`: `Usage`, or `Purchase`/`Tax` for the monthly lumps.
+    pub charge_category: &'static str,
+    pub cost: f64,
+}
+
+/// The anomaly fixture's rows. With default rules and `today = end_day + 1`
+/// it yields exactly four anomalies: EC2 and account 111 spike (age 3–5),
+/// SageMaker and account 333 new spend (age 5). RDS's +$3 and Lambda's
+/// $0.10 → $1 must NOT fire, nor EC2's unsettled $30 days (age 0–1), nor
+/// the $1500 Support purchase and $25 tax billed on the 1st of each month.
+pub fn anomaly_fixture_rows(end_day: chrono::NaiveDate) -> Vec<AnomalyFixtureRow> {
+    use chrono::{Datelike, Duration, Weekday};
+    let mut rows = Vec::new();
+    for age in (0..ANOMALY_FIXTURE_DAYS).rev() {
+        let day = end_day - Duration::days(age);
+        let weekend = matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
+        let ec2 = match age {
+            0..=1 => 30.0,
+            3..=5 => 420.0,
+            _ if weekend => 80.0,
+            _ => 120.0,
+        };
+        let mut push = |service, account, charge_category, cost| {
+            rows.push(AnomalyFixtureRow { day, service, account, charge_category, cost })
+        };
+        push(ANOMALY_SPIKE_SERVICE, ANOMALY_SPIKE_ACCOUNT, "Usage", ec2);
+        push("Amazon Simple Storage Service", ANOMALY_SPIKE_ACCOUNT, "Usage", 40.0);
+        push("Amazon Relational Database Service", "222222222222", "Usage", if age == 4 { 203.0 } else { 200.0 });
+        push("AWS Lambda", "222222222222", "Usage", if age == 4 { 1.00 } else { 0.10 });
+        if (2..=5).contains(&age) {
+            push(ANOMALY_NEW_SERVICE, ANOMALY_NEW_ACCOUNT, "Usage", 60.0);
+        }
+        if day.day() == 1 {
+            push(ANOMALY_SUPPORT_SERVICE, ANOMALY_SPIKE_ACCOUNT, "Purchase", 1500.0);
+            push("Tax", ANOMALY_SPIKE_ACCOUNT, "Tax", 25.0);
+        }
+    }
+    rows
+}
+
+/// Writes the anomaly fixture as one `BILLING_PERIOD=YYYY-MM` partition per month.
+pub fn generate_anomaly_fixture(base_dir: &Path, end_day: chrono::NaiveDate) -> Result<(), FixtureError> {
+    use chrono::Datelike;
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch("LOAD parquet;")?;
+
+    let mut by_month: std::collections::BTreeMap<(i32, u32), Vec<AnomalyFixtureRow>> = Default::default();
+    for row in anomaly_fixture_rows(end_day) {
+        by_month.entry((row.day.year(), row.day.month())).or_default().push(row);
+    }
+    for ((year, month), rows) in by_month {
+        let period_start = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        let period_end = if month == 12 {
+            chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+        } else {
+            chrono::NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+        };
+        let dir = base_dir.join(format!("BILLING_PERIOD={year:04}-{month:02}"));
+        fs::create_dir_all(&dir)?;
+        let parquet_str = dir.join("data.parquet").to_str().unwrap().replace('\\', "/");
+        let values = rows
+            .iter()
+            .map(|r| format!("(DATE '{}', '{}', '{}', '{}', {})", r.day, r.service, r.account, r.charge_category, r.cost))
+            .collect::<Vec<_>>()
+            .join(",\n                ");
+        let sql = format!(
+            r#"COPY (
+            WITH t AS (
+              SELECT * FROM (VALUES
+                {values}
+              ) AS t(day, service_name, account_id, charge_category, cost)
+            )
+            SELECT
+                TIMESTAMP '{period_start} 00:00:00' AS BillingPeriodStart,
+                TIMESTAMP '{period_end} 00:00:00'   AS BillingPeriodEnd,
+                CAST(day AS TIMESTAMP)               AS ChargePeriodStart,
+                CAST(day AS TIMESTAMP) + INTERVAL 1 DAY AS ChargePeriodEnd,
+                'payer-001'     AS BillingAccountId,
+                'Payer Name'    AS BillingAccountName,
+                account_id      AS SubAccountId,
+                account_id      AS SubAccountName,
+                'AWS'           AS ProviderName,
+                'Amazon'        AS PublisherName,
+                service_name    AS ServiceName,
+                'Compute'       AS ServiceCategory,
+                'General'       AS ServiceSubcategory,
+                'us-east-1'     AS RegionName,
+                'us-east-1a'    AS AvailabilityZone,
+                'res-' || account_id AS ResourceId,
+                'res-' || account_id AS ResourceName,
+                'generic'       AS ResourceType,
+                charge_category AS ChargeCategory,
+                NULL::VARCHAR   AS ChargeClass,
+                CASE WHEN charge_category = 'Usage' THEN 'Usage-Based' ELSE 'Recurring' END AS ChargeFrequency,
+                lower(charge_category) AS ChargeDescription,
+                'OnDemand'      AS PricingCategory,
+                1.0             AS ConsumedQuantity,
+                'Hours'         AS ConsumedUnit,
+                cost            AS BilledCost,
+                cost            AS EffectiveCost,
+                cost * 1.15     AS ListCost,
+                cost * 1.05     AS ContractedCost,
+                'USD'           AS BillingCurrency,
+                NULL::MAP(VARCHAR, VARCHAR) AS Tags,
+                NULL::VARCHAR   AS CommitmentDiscountId,
+                NULL::VARCHAR   AS CommitmentDiscountType,
+                NULL::VARCHAR   AS CommitmentDiscountStatus,
+                NULL::VARCHAR   AS x_ServiceCode
+            FROM t
+        ) TO '{parquet_str}' (FORMAT PARQUET)"#,
+        );
+        conn.execute_batch(&sql)?;
+        let manifest = serde_json::json!({
+            "dataFiles": ["data.parquet"],
+            "billingPeriod": {
+                "start": format!("{period_start}T00:00:00Z"),
+                "end": format!("{period_end}T00:00:00Z")
+            }
+        });
+        fs::write(dir.join("Manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

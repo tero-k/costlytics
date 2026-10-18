@@ -204,6 +204,15 @@ mod tests {
             })
         }
 
+        fn daily_series(
+            &self,
+            _start: chrono::NaiveDate,
+            _end: chrono::NaiveDate,
+            _metric: domain::cost::CostMetric,
+        ) -> Result<Vec<domain::anomaly::DailySeriesRow>, data::queries::summary::QueryError> {
+            Ok(Vec::new())
+        }
+
         fn distinct_services(&self) -> Result<Vec<String>, data::queries::summary::QueryError> {
             Ok(vec!["EC2".to_string(), "S3".to_string()])
         }

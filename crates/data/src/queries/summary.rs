@@ -100,6 +100,15 @@ pub trait CostRepository: Send + Sync {
         needle: &str,
         limit: usize,
     ) -> Result<Vec<String>, QueryError>;
+
+    /// Daily cost per service and per account over `[start, end)` dates
+    /// (anomaly detection input). One scan via GROUPING SETS.
+    fn daily_series(
+        &self,
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+        metric: domain::cost::CostMetric,
+    ) -> Result<Vec<domain::anomaly::DailySeriesRow>, QueryError>;
 }
 
 pub struct DuckDbCostRepository {
@@ -396,6 +405,16 @@ impl CostRepository for DuckDbCostRepository {
             .collect::<Result<_, _>>()?;
 
         Ok(ids)
+    }
+
+    fn daily_series(
+        &self,
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+        metric: domain::cost::CostMetric,
+    ) -> Result<Vec<domain::anomaly::DailySeriesRow>, QueryError> {
+        let conn = self.pool.get()?;
+        crate::queries::daily_series::query(&conn, start, end, metric)
     }
 
     fn compare(
