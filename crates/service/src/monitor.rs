@@ -213,8 +213,15 @@ impl Monitor {
         };
         // Covers data and rules, so a saved rule change re-runs the automatic check.
         let fingerprint = format!("{}:{}", scan.fingerprint, rules_fingerprint(ctx.config));
-        let previous_fingerprint = previous.as_ref().and_then(|r| r.fingerprint.as_deref());
-        if mode == CheckMode::Auto && previous_fingerprint == Some(fingerprint.as_str()) {
+        // Only a completed (or cost-guard-skipped) run counts: after an error the next tick retries.
+        let unchanged = previous.as_ref().is_some_and(|r| {
+            r.fingerprint.as_deref() == Some(fingerprint.as_str())
+                && matches!(
+                    r.outcome,
+                    RunOutcome::Ok | RunOutcome::SkippedCostGuard { .. }
+                )
+        });
+        if mode == CheckMode::Auto && unchanged {
             return CheckOutcome::Unchanged;
         }
 
@@ -579,6 +586,31 @@ mod tests {
                 .outcome,
             CheckOutcome::Ok { .. }
         ));
+    }
+
+    #[test]
+    fn a_failed_check_is_retried_even_with_a_matching_fingerprint() {
+        let env = Env::new();
+        let monitor = Monitor::default();
+        monitor.check(&env.ctx(), "a", CheckMode::Auto, now());
+        let ok = env.store.run_state("a").unwrap();
+        env.store
+            .record_run(
+                "a",
+                RunState {
+                    outcome: RunOutcome::Error {
+                        message: "disk full".into(),
+                    },
+                    ..ok
+                },
+            )
+            .unwrap();
+        let retried = monitor.check(&env.ctx(), "a", CheckMode::Auto, now());
+        assert!(
+            matches!(retried.outcome, CheckOutcome::Ok { .. }),
+            "{retried:?}"
+        );
+        assert_eq!(env.store.run_state("a").unwrap().outcome, RunOutcome::Ok);
     }
 
     #[test]
