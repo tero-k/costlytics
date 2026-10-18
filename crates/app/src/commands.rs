@@ -148,6 +148,15 @@ fn spawn_auto_check(svc: &Svc<'_>, id: String) {
     });
 }
 
+/// After the rules change, re-check every source off the UI thread; the
+/// rules fingerprint makes these run even though the data is unchanged.
+fn spawn_auto_check_all(svc: &Svc<'_>) {
+    let svc = Arc::clone(svc.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        svc.check_auto_all();
+    });
+}
+
 #[tauri::command]
 pub async fn anomalies(svc: Svc<'_>, req: AnomaliesQuery) -> Result<AnomaliesResponse, ServiceError> {
     let _ = req;
@@ -171,5 +180,9 @@ pub async fn anomalies_mute(svc: Svc<'_>, req: MuteRequest) -> Result<AnomaliesR
 
 #[tauri::command]
 pub async fn settings_anomaly_save(svc: Svc<'_>, req: AnomalyConfig) -> Result<AnomalyConfig, ServiceError> {
-    blocking(&svc, move |s| s.save_anomaly_config(req)).await
+    let result = blocking(&svc, move |s| s.save_anomaly_config(req)).await;
+    if result.is_ok() {
+        spawn_auto_check_all(&svc);
+    }
+    result
 }

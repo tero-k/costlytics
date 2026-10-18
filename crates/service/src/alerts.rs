@@ -80,7 +80,7 @@ pub enum RunOutcome {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunState {
-    /// Data fingerprint the last successful check saw; `None` until one succeeds.
+    /// `{data}:{rules}` fingerprint the last successful check saw; `None` until one succeeds.
     pub fingerprint: Option<String>,
     pub last_checked_day: Option<NaiveDate>,
     pub last_run_at: DateTime<Utc>,

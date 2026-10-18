@@ -88,6 +88,24 @@ pub fn check_window(
     }
 }
 
+/// Stable hash of every rule that affects detection: everything in
+/// `AnomalyConfig` except `enabled` and `check_interval_hours`, overrides included.
+pub fn rules_fingerprint(config: &AnomalyConfig) -> String {
+    let projection = AnomalyConfig {
+        enabled: true,
+        check_interval_hours: 0,
+        ..config.clone()
+    };
+    let mut hasher = crate::register::Fnv1a::default();
+    // serde_json keeps struct field order, so the encoding is stable.
+    hasher.feed(
+        serde_json::to_string(&projection)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.hex()
+}
+
 fn group_series(
     rows: Vec<DailySeriesRow>,
 ) -> BTreeMap<(ScopeKind, String), BTreeMap<NaiveDate, f64>> {
@@ -193,8 +211,10 @@ impl Monitor {
             Ok(scan) => scan,
             Err(e) => return CheckOutcome::Error { message: e.message },
         };
+        // Covers data and rules, so a saved rule change re-runs the automatic check.
+        let fingerprint = format!("{}:{}", scan.fingerprint, rules_fingerprint(ctx.config));
         let previous_fingerprint = previous.as_ref().and_then(|r| r.fingerprint.as_deref());
-        if mode == CheckMode::Auto && previous_fingerprint == Some(scan.fingerprint.as_str()) {
+        if mode == CheckMode::Auto && previous_fingerprint == Some(fingerprint.as_str()) {
             return CheckOutcome::Unchanged;
         }
 
@@ -259,7 +279,7 @@ impl Monitor {
         });
         if empty {
             let run = RunState {
-                fingerprint: Some(scan.fingerprint.clone()),
+                fingerprint: Some(fingerprint.clone()),
                 last_checked_day: last_checked,
                 last_run_at: now,
                 outcome: RunOutcome::Ok,
@@ -314,7 +334,7 @@ impl Monitor {
             }
         }
         let run = RunState {
-            fingerprint: Some(scan.fingerprint.clone()),
+            fingerprint: Some(fingerprint.clone()),
             last_checked_day: checked_to.max(last_checked),
             last_run_at: now,
             outcome: RunOutcome::Ok,
@@ -515,6 +535,50 @@ mod tests {
             "{manual:?}"
         );
         assert_eq!(env.store.snapshot(now().date_naive()).anomalies.len(), 4);
+    }
+
+    #[test]
+    fn changed_rules_re_run_auto_but_scheduling_fields_do_not() {
+        let mut env = Env::new();
+        let monitor = Monitor::default();
+        monitor.check(&env.ctx(), "a", CheckMode::Auto, now());
+        env.config.check_interval_hours = 24;
+        assert_eq!(
+            monitor
+                .check(&env.ctx(), "a", CheckMode::Auto, now())
+                .outcome,
+            CheckOutcome::Unchanged,
+            "the interval doesn't affect detection"
+        );
+        env.config.min_delta_usd = 50.0;
+        let changed = monitor.check(&env.ctx(), "a", CheckMode::Auto, now());
+        assert!(
+            matches!(changed.outcome, CheckOutcome::Ok { .. }),
+            "{changed:?}"
+        );
+        assert_eq!(
+            monitor
+                .check(&env.ctx(), "a", CheckMode::Auto, now())
+                .outcome,
+            CheckOutcome::Unchanged
+        );
+        env.config.overrides.push(data::config::AnomalyOverride {
+            scope: ScopeKind::Service,
+            key: ANOMALY_SPIKE_SERVICE.into(),
+            mad_multiplier: None,
+            min_delta_usd: Some(5000.0),
+            min_delta_pct: None,
+            min_monthly_impact_usd: None,
+            include_drops: None,
+            severity_medium_usd: None,
+            severity_high_usd: None,
+        });
+        assert!(matches!(
+            monitor
+                .check(&env.ctx(), "a", CheckMode::Auto, now())
+                .outcome,
+            CheckOutcome::Ok { .. }
+        ));
     }
 
     #[test]

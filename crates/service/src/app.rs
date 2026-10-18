@@ -1037,6 +1037,17 @@ mod tests {
     }
 
     #[test]
+    fn saved_rule_changes_re_run_the_auto_check_without_new_data() {
+        let f = fixture();
+        save(&f, local("an", &anomaly_fixture(&f)), None, true).unwrap();
+        assert!(matches!(f.svc.check_auto("an").outcome, crate::monitor::CheckOutcome::Ok { .. }));
+        f.svc.save_anomaly_config(AnomalyConfig::default()).unwrap();
+        assert_eq!(f.svc.check_auto("an").outcome, crate::monitor::CheckOutcome::Unchanged, "same rules, same data");
+        f.svc.save_anomaly_config(AnomalyConfig { min_delta_usd: 50.0, ..Default::default() }).unwrap();
+        assert_ne!(f.svc.check_auto("an").outcome, crate::monitor::CheckOutcome::Unchanged);
+    }
+
+    #[test]
     fn save_anomaly_config_persists_and_validates() {
         let f = fixture();
         let cfg = AnomalyConfig { min_delta_usd: 50.0, ..Default::default() };

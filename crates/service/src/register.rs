@@ -85,15 +85,8 @@ fn s3_auth(source: &DataSource, secret: Option<&str>) -> Result<S3Auth, String> 
 /// file rewritten in place under the same name still changes it. Persisted
 /// in `alerts.json`, hence a fixed algorithm rather than `DefaultHasher`.
 pub fn data_fingerprint(files: &[String], index: Option<&ScanIndex>) -> String {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    let mut feed = |bytes: &[u8]| {
-        for b in bytes {
-            hash ^= u64::from(*b);
-            hash = hash.wrapping_mul(PRIME);
-        }
-    };
+    let mut hasher = Fnv1a::default();
+    let mut feed = |bytes: &[u8]| hasher.feed(bytes);
     let mut sorted: Vec<&String> = files.iter().collect();
     sorted.sort();
     for f in sorted {
@@ -105,7 +98,30 @@ pub fn data_fingerprint(files: &[String], index: Option<&ScanIndex>) -> String {
             feed(format!("{}|{:?}|{:?}|{}|{};", e.file, e.min_ts, e.max_ts, e.bytes, e.column_chunks).as_bytes());
         }
     }
-    format!("{hash:016x}")
+    hasher.hex()
+}
+
+/// FNV-1a 64: a fixed hash for fingerprints persisted across runs.
+pub(crate) struct Fnv1a(u64);
+
+impl Default for Fnv1a {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Fnv1a {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        for b in bytes {
+            self.0 ^= u64::from(*b);
+            self.0 = self.0.wrapping_mul(PRIME);
+        }
+    }
+
+    pub(crate) fn hex(&self) -> String {
+        format!("{:016x}", self.0)
+    }
 }
 
 /// Discover, schema-detect and register one source's `normalized_cost` view
