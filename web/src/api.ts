@@ -561,6 +561,7 @@ export interface CostGuardSettings {
 export interface SettingsResponse {
   sources: SourceSettings[];
   cost_guard: CostGuardSettings;
+  anomaly: AnomalySettings;
 }
 
 export interface TestSourceResponse {
@@ -599,4 +600,127 @@ export async function reloadSource(id: string): Promise<SourceStatus> {
 
 export async function saveCostGuard(settings: CostGuardSettings): Promise<CostGuardSettings> {
   return postJson<CostGuardSettings>('/api/v1/settings/cost-guard-save', settings);
+}
+
+// ---------------------------------------------------------------------------
+// Spend anomalies (`crates/service/src/alerts.rs`, `monitor.rs`)
+// ---------------------------------------------------------------------------
+
+export type ScopeKind = 'service' | 'account';
+export type AnomalyKind = 'spike' | 'drop' | 'new_spend';
+export type Severity = 'low' | 'medium' | 'high';
+
+export interface AnomalyPoint {
+  day: string;
+  expected: number;
+  actual: number;
+  severity: Severity;
+}
+
+export interface Anomaly {
+  id: string;
+  source_id: string;
+  scope_kind: ScopeKind;
+  scope_key: string;
+  kind: AnomalyKind;
+  direction: 'up' | 'down';
+  first_day: string;
+  last_day: string;
+  points: AnomalyPoint[];
+  total_impact: number;
+  severity: Severity;
+  status: 'open' | 'acknowledged';
+  /** Reopened because its severity rose after it was acknowledged. */
+  escalated: boolean;
+  muted: boolean;
+  detected_at: string;
+  updated_at: string;
+}
+
+export type RunOutcome =
+  | { kind: 'ok' }
+  | { kind: 'skipped_cost_guard'; estimate_usd: number }
+  | { kind: 'error'; message: string };
+
+export interface RunState {
+  fingerprint: string | null;
+  last_checked_day: string | null;
+  last_run_at: string;
+  outcome: RunOutcome;
+  estimate_usd: number | null;
+}
+
+export interface SourceRun {
+  source_id: string;
+  source_name: string;
+  run: RunState | null;
+}
+
+export interface AnomaliesResponse {
+  enabled: boolean;
+  open_count: number;
+  anomalies: Anomaly[];
+  runs: SourceRun[];
+}
+
+export type CheckResult = { source_id: string } & (
+  | { kind: 'ok'; checked_from: string | null; checked_to: string | null; new_anomalies: number }
+  | { kind: 'unchanged' }
+  | { kind: 'disabled' }
+  | { kind: 'already_running' }
+  | { kind: 'skipped_cost_guard'; estimate_usd: number }
+  | { kind: 'needs_confirmation'; estimate_usd: number }
+  | { kind: 'error'; message: string }
+);
+
+/** Mirrors `data::config::AnomalyOverride`; omitted/null fields inherit the globals. */
+export interface AnomalyOverride {
+  scope: ScopeKind;
+  key: string;
+  mad_multiplier?: number | null;
+  min_delta_usd?: number | null;
+  min_delta_pct?: number | null;
+  min_monthly_impact_usd?: number | null;
+  include_drops?: boolean | null;
+  severity_medium_usd?: number | null;
+  severity_high_usd?: number | null;
+}
+
+/** Mirrors `data::config::AnomalyConfig` (`min_delta_pct` is a fraction: 0.25 = 25%). */
+export interface AnomalySettings {
+  enabled: boolean;
+  metric: CostMetric;
+  lookback_days: number;
+  settling_days: number;
+  mad_multiplier: number;
+  min_delta_usd: number;
+  min_delta_pct: number;
+  min_monthly_impact_usd: number;
+  include_drops: boolean;
+  severity_medium_usd: number;
+  severity_high_usd: number;
+  check_interval_hours: number;
+  overrides: AnomalyOverride[];
+}
+
+export async function getAnomalies(): Promise<AnomaliesResponse> {
+  return getJson<AnomaliesResponse>('/api/v1/anomalies');
+}
+
+/** "Check now". `sourceId: null` checks every source; `confirm` approves a scan over cost guard's hard limit. */
+export async function runAnomalyCheck(sourceId: string | null, confirm: boolean): Promise<CheckResult[]> {
+  return postJson<CheckResult[]>('/api/v1/anomalies/run', { source_id: sourceId, confirm });
+}
+
+export async function acknowledgeAnomaly(id: string): Promise<Anomaly> {
+  return postJson<Anomaly>('/api/v1/anomalies/ack', { id });
+}
+
+/** Mutes one source's service or account for `days` days. */
+export async function muteAnomalyScope(sourceId: string, scopeKind: ScopeKind, scopeKey: string, days: number): Promise<AnomaliesResponse> {
+  return postJson<AnomaliesResponse>('/api/v1/anomalies/mute', { source_id: sourceId, scope_kind: scopeKind, scope_key: scopeKey, days });
+}
+
+export async function saveAnomalySettings(settings: AnomalySettings): Promise<AnomalySettings> {
+  return postJson<AnomalySettings>('/api/v1/settings/anomaly-save', settings);
 }
