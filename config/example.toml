@@ -19,3 +19,9 @@ id = "local-cur2"
 name = "Local CUR 2.0 fixture"
 s3_uri = "fixtures/cur2"
 source_type = "cur2"
+
+[[sources]]
+id = "local-anomaly"
+name = "Local anomaly fixture (daily, for the Anomalies page)"
+s3_uri = "fixtures/anomaly"
+source_type = "focus12"

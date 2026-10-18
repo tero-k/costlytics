@@ -7,6 +7,12 @@ the README).
 
 ## [Unreleased]
 
+### Added
+- Anomalies: per-service and per-account spend anomaly detection with
+  materiality floors (usage charges only), an inbox with acknowledge/mute and
+  escalation, a sidebar badge,
+  "Check now", and Settings → Anomaly rules with per-scope overrides.
+
 ## [0.1.0] - 2026-09-26
 
 First public release.

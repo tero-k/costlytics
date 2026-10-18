@@ -7,14 +7,18 @@
 //! - `fixtures/cur2/`    — a synthetic CUR 2.0 Parquet dataset (small, golden values)
 //! - `fixtures/demo/`    — a larger synthetic FOCUS 1.2 dataset (22 services, 3
 //!   accounts, some untagged rows) for frontend dev/demo use
+//! - `fixtures/anomaly/` — a daily FOCUS 1.2 dataset ending yesterday, with a
+//!   known set of spend anomalies for the Anomalies page
 //!
 //! relative to the current working directory (run from the workspace root,
-//! e.g. via `cargo run -p data --bin generate-fixtures`). All three
+//! e.g. via `cargo run -p data --bin generate-fixtures`). All four
 //! directories are gitignored (`/fixtures/`) — this binary is the supported
 //! way to (re)create them locally; it does not modify the tested generator
 //! functions in `data::fixtures`, only calls them.
 
-use data::fixtures::{generate_cur2_fixture, generate_demo_fixture, generate_focus12_fixture};
+use data::fixtures::{
+    generate_anomaly_fixture, generate_cur2_fixture, generate_demo_fixture, generate_focus12_fixture,
+};
 use std::path::Path;
 
 fn main() {
@@ -43,8 +47,20 @@ fn main() {
     }
     println!("  done.");
 
+    let anomaly_dir = Path::new("fixtures/anomaly");
+    println!("Generating anomaly fixture at {}...", anomaly_dir.display());
+    // Relative to today, so the harness's startup check always finds the
+    // fixture's spike and new spend inside its window.
+    let _ = std::fs::remove_dir_all(anomaly_dir); // drop last run's month partitions
+    let end_day = chrono::Utc::now().date_naive() - chrono::Duration::days(1);
+    if let Err(e) = generate_anomaly_fixture(anomaly_dir, end_day) {
+        eprintln!("failed to generate anomaly fixture: {e}");
+        std::process::exit(1);
+    }
+    println!("  done.");
+
     println!(
-        "\nFixtures ready. `config/example.toml` already registers `local-focus12`/`local-cur2`/`local-demo` \
+        "\nFixtures ready. `config/example.toml` already registers `local-focus12`/`local-cur2`/`local-demo`/`local-anomaly` \
          sources pointing at these directories — run `cargo run -p api` to query them."
     );
 }

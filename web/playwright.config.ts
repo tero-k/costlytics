@@ -59,9 +59,11 @@ export default defineConfig({
       // backend, which persists those mutations back to whatever file
       // `COSTLYTICS_CONFIG` points at — running against the checked-in
       // `config/example.toml` directly would let the suite modify (and
-      // dirty git's view of) that file.
+      // dirty git's view of) that file. Likewise, anomaly ack/mute state
+      // persists in `target/alerts.json` next to the scratch settings file,
+      // and would otherwise leak between runs, so it is cleared first.
       command:
-        'cargo run -p data --bin generate-fixtures && node -e "require(\'fs\').copyFileSync(\'config/example.toml\',\'target/e2e-settings.toml\')" && cargo run -p api',
+        'cargo run -p data --bin generate-fixtures && node -e "require(\'fs\').copyFileSync(\'config/example.toml\',\'target/e2e-settings.toml\')" && node -e "require(\'fs\').rmSync(\'target/alerts.json\',{force:true})" && cargo run -p api',
       cwd: '..',
       env: { COSTLYTICS_CONFIG: 'target/e2e-settings.toml' },
       url: 'http://127.0.0.1:3000/api/v1/sources',

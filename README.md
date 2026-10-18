@@ -29,6 +29,12 @@ third-party service between you and your billing data.
   switch between them. S3 credentials are kept in the OS keychain.
 - **Cost guard**: warns before a query would read an expensive amount of data
   from S3.
+- **Anomalies**: watches daily spend per service and per account and flags
+  changes that are both unusual for that scope and big enough to matter
+  (configurable floors, so $0.10 → $1 never alerts). Only usage charges are
+  watched, so monthly tax, Support and commitment fees don't alert. Anomalies
+  collect in an inbox where you acknowledge, mute or open them; checks run
+  while the app is open, when new billing data arrives, and respect cost guard.
 - **Shareable views**: the date range, metric, source and filters are all in
   the URL.
 
@@ -229,11 +235,40 @@ trend, and its cost by service, account and region.
 
 ![Tags](docs/screenshots/tags.png)
 
+**Anomalies**: an inbox of unusual spend. See [Anomalies](#anomalies).
+
 **Settings**: add, edit, reload or delete data sources, and configure the
-[cost guard](#cost-guard).
+[cost guard](#cost-guard) and the anomaly rules.
 
 The app version is shown at the bottom of the sidebar. Hover over it to see
 the exact build.
+
+### Anomalies
+
+Costlytics compares each service's and each account's daily spend with its
+own recent history and lists the changes that are both unusual for that scope
+and large enough to matter. A badge on the **Anomalies** sidebar item counts
+the open ones. **Check now** runs a check on demand.
+
+- **Rules**: set them under **Settings → Anomaly rules**: the lookback
+  window, the sensitivity and the materiality floors (the minimum change in
+  dollars and percent). You can override the rules for individual services or
+  accounts.
+- **Settling window**: the most recent days of billing data are still being
+  finalized, so they are left out of the comparison until they settle.
+- **Usage charges only**: tax, purchases, credits and refunds are excluded, so
+  monthly Tax, Support and commitment fees don't raise anomalies.
+- **Drops**: decreases are off by default. Turn them on in the rules if you
+  want to be told about them.
+- **Acknowledge, mute, open**: acknowledging hides an anomaly. If its
+  severity later rises, it reopens tagged "Escalated". Muting hides a service
+  or account for a chosen period, and a mute applies to one source only. Open
+  jumps to the detail page for the anomaly's dates.
+- **Where state lives**: acknowledgements, mutes and run history are stored
+  in `alerts.json`, next to `settings.toml`.
+
+Checks run while the app is open, when new billing data arrives, and respect
+the [cost guard](#cost-guard).
 
 ## Development
 
@@ -264,7 +299,9 @@ cargo run -p data --bin generate-fixtures
 
 This creates `fixtures/focus12/` (FOCUS 1.2), `fixtures/cur2/` (CUR 2.0) and
 `fixtures/demo/`. `demo` is a wider FOCUS 1.2 set with 22 services, 3 accounts
-and some untagged rows, for trying out the UI. All three cover August 2026.
+and some untagged rows, for trying out the UI. These three cover August 2026.
+It also creates `fixtures/anomaly/`, a daily set that always ends yesterday
+and contains known anomalies for the Anomalies page.
 
 ### Running in the browser
 
