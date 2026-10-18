@@ -86,6 +86,49 @@
             <div id="cost-guard-result" class="form-result" role="status"></div>
           </form>
         </section>
+        <section class="chart-section" id="anomaly-section">
+          <div class="chart-header"><h2>Anomaly rules</h2></div>
+          <form id="anomaly-form" class="settings-form" novalidate>
+            <label class="control"><span>Detect spend anomalies</span>
+              <select id="an-enabled"><option value="true">On</option><option value="false">Off</option></select>
+            </label>
+            <label class="control"><span>Cost metric</span>
+              <select id="an-metric">
+                <option value="amortized">Amortized</option><option value="billed">Billed</option>
+                <option value="list">List</option><option value="contracted">Contracted</option>
+              </select>
+            </label>
+            <label class="control"><span>Ignore changes under (USD per day)</span><input id="an-min-delta" type="number" min="0" step="1" /></label>
+            <label class="control"><span>&hellip;or under (% of expected)</span><input id="an-min-pct" type="number" min="0" step="1" /></label>
+            <label class="control"><span>&hellip;or under (USD per month, 0 = off)</span><input id="an-monthly" type="number" min="0" step="10" /></label>
+            <label class="control"><span>Sensitivity (× typical variation)</span><input id="an-mad" type="number" min="0.1" step="0.1" /></label>
+            <label class="control"><span>Flag drops too</span>
+              <select id="an-drops"><option value="true">Yes</option><option value="false">No</option></select>
+            </label>
+            <label class="control"><span>Medium severity from (USD per month)</span><input id="an-sev-medium" type="number" min="0" step="50" /></label>
+            <label class="control"><span>High severity from (USD per month)</span><input id="an-sev-high" type="number" min="0" step="50" /></label>
+            <label class="control"><span>Baseline (days)</span><input id="an-lookback" type="number" min="14" max="90" step="1" /></label>
+            <label class="control"><span>Skip newest (days, still being revised)</span><input id="an-settling" type="number" min="0" max="7" step="1" /></label>
+            <label class="control"><span>Check every (hours)</span><input id="an-interval" type="number" min="1" step="1" /></label>
+            <p class="form-hint">
+              A day counts as an anomaly only when it&rsquo;s unusual for that service or account <em>and</em> clears every
+              &ldquo;ignore&rdquo; floor, so small-cost noise never alerts. Overrides below replace individual rules for one
+              service or account; leave a field blank to inherit.
+            </p>
+            <div class="wide">
+              <table class="data-table" id="an-overrides">
+                <thead><tr><th>Scope</th><th>Service / account</th><th>USD/day</th><th>%</th><th>USD/month</th>
+                  <th>Sensitivity</th><th>Drops</th><th>Medium from</th><th>High from</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <datalist id="an-keys-service"></datalist>
+              <datalist id="an-keys-account"></datalist>
+              <button type="button" id="an-add-override">Add override</button>
+            </div>
+            <div class="form-actions"><button type="submit" class="button-primary">Save anomaly rules</button></div>
+            <div id="anomaly-result" class="form-result" role="status"></div>
+          </form>
+        </section>
       </main>
     </div>
     <script type="module" src="/src/settingsMain.ts"></script>

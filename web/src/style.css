@@ -1425,3 +1425,6 @@ main > [hidden],
 .sparkline path { fill: none; stroke-width: 1.5; }
 .sparkline .spark-actual { stroke: var(--color-danger); }
 .sparkline .spark-expected { stroke: var(--color-text-muted); stroke-dasharray: 2 2; }
+
+#an-overrides input { width: 6.5rem; }
+#an-overrides .ov-key { width: 14rem; }
