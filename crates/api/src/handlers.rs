@@ -251,7 +251,7 @@ mod tests {
     }
 
     fn service_with(sources: Vec<data::config::DataSource>) -> service::CostlyticsService {
-        let config = data::config::AppConfig { server: Default::default(), sources, cost_guard: Default::default() };
+        let config = data::config::AppConfig { server: Default::default(), sources, cost_guard: Default::default(), anomaly: Default::default() };
         service::CostlyticsService::new(config, None, Arc::new(service::secrets::MemorySecretStore::default()))
     }
 

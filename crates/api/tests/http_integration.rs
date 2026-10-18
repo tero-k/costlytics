@@ -23,6 +23,7 @@ async fn http_cost_summary_matches_fixture_total() {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
@@ -79,6 +80,7 @@ async fn http_cost_summary_matches_focus10_fixture_total() {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![DataSource {
             id: "test-focus10-source".into(),
             name: "Test FOCUS 1.0 fixture source".into(),
@@ -134,6 +136,7 @@ async fn cur2_cost_summary_total(metric: &str) -> f64 {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![DataSource {
             id: "test-cur2-source".into(),
             name: "Test CUR 2.0 fixture source".into(),
@@ -206,6 +209,7 @@ async fn http_timeseries_matches_fixture_total() {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
@@ -269,6 +273,7 @@ async fn http_filter_values_and_compare_over_real_http() {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
@@ -385,6 +390,7 @@ async fn http_sources_list_reflects_configured_sources() {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![
             DataSource {
                 id: "local-good".into(),
@@ -499,6 +505,7 @@ async fn http_cost_estimate_for_local_source() {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
@@ -537,6 +544,7 @@ async fn http_resource_search_finds_fixture_resource() {
     let config = AppConfig {
         server: ServerConfig::default(),
         cost_guard: Default::default(),
+        anomaly: Default::default(),
         sources: vec![DataSource {
             id: "test-source".into(),
             name: "Test fixture source".into(),
