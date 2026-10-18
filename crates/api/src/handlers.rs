@@ -272,6 +272,7 @@ mod tests {
             billing_periods: vec![],
             remote: false,
             scan_index: None,
+            fingerprint: String::new(),
         }
     }
 

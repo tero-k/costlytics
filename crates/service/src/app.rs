@@ -392,6 +392,29 @@ impl CostlyticsService {
         self.register_with_generation(&source, secret.as_deref(), generation);
         self.entry(&source.id)
     }
+
+    /// Blocking: re-discovers `id`'s files and swaps the new registration in
+    /// only if its data fingerprint changed. Unlike `reload_source`, the
+    /// source stays `Registered` throughout (no `Pending` flicker on open
+    /// pages), and a failure leaves the current registration untouched. A
+    /// concurrent save/reload bumps the generation, so its result wins.
+    pub fn refresh_source(&self, id: &str) -> Result<bool, ServiceError> {
+        let source = self.find(id).ok_or_else(|| ServiceError::not_found(format!("unknown source '{id}'")))?;
+        let Some(generation) = self.registry.generation(id) else {
+            return Ok(false);
+        };
+        let previous = self.registry.scan(Some(id)).ok().map(|s| s.fingerprint);
+        let secret = match source.auth {
+            S3AuthConfig::AccessKey { .. } => self.stored_secret(&source.id),
+            S3AuthConfig::CredentialChain => None,
+        };
+        let registered = register_source(&source, secret.as_deref()).map_err(ServiceError::internal)?;
+        if previous.as_deref() == Some(registered.fingerprint.as_str()) {
+            return Ok(false);
+        }
+        self.registry.set_result_if_current(id, generation, Ok(registered));
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +455,21 @@ mod tests {
 
     fn save(f: &Fixture, source: DataSource, secret: Option<&str>, is_new: bool) -> Result<SourceEntry, ServiceError> {
         f.svc.save_source(SaveSourceRequest { source, secret: secret.map(String::from), is_new })
+    }
+
+    #[test]
+    fn refresh_source_swaps_only_when_data_changed() {
+        let f = fixture();
+        save(&f, local("r", &f.fixture_path), None, true).unwrap();
+        let before = f.svc.registry.scan(Some("r")).unwrap().fingerprint;
+        assert!(!f.svc.refresh_source("r").unwrap(), "unchanged data is not swapped");
+        assert!(matches!(f.svc.registry.diagnostics()[0].status, SourceStatus::Registered { file_count: 2, .. }));
+
+        std::fs::remove_dir_all(std::path::Path::new(&f.fixture_path).join("BILLING_PERIOD=2026-09")).unwrap();
+        assert!(f.svc.refresh_source("r").unwrap());
+        assert_ne!(f.svc.registry.scan(Some("r")).unwrap().fingerprint, before);
+        assert!(matches!(f.svc.registry.diagnostics()[0].status, SourceStatus::Registered { file_count: 1, .. }));
+        assert_eq!(f.svc.refresh_source("zz").unwrap_err().kind, ErrorKind::NotFound);
     }
 
     #[test]

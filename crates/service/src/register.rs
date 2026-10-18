@@ -21,6 +21,8 @@ pub struct Registered {
     /// Row-group index for cost estimates; `None` if the source is empty or
     /// the footers could not be indexed (estimates then report "unknown").
     pub scan_index: Option<Arc<ScanIndex>>,
+    /// Identifies the exact data registered: file list + footer index. Changes when AWS delivers or rewrites files.
+    pub fingerprint: String,
 }
 
 impl std::fmt::Debug for Registered {
@@ -30,6 +32,7 @@ impl std::fmt::Debug for Registered {
             .field("file_count", &self.file_count)
             .field("billing_periods", &self.billing_periods)
             .field("remote", &self.remote)
+            .field("fingerprint", &self.fingerprint)
             .finish_non_exhaustive()
     }
 }
@@ -75,6 +78,33 @@ fn s3_auth(source: &DataSource, secret: Option<&str>) -> Result<S3Auth, String> 
             })
         }
     }
+}
+
+/// Stable FNV-1a 64 hash of the sorted file list and the footer index, so a
+/// file rewritten in place under the same name still changes it. Persisted
+/// in `alerts.json`, hence a fixed algorithm rather than `DefaultHasher`.
+pub fn data_fingerprint(files: &[String], index: Option<&ScanIndex>) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    let mut sorted: Vec<&String> = files.iter().collect();
+    sorted.sort();
+    for f in sorted {
+        feed(f.as_bytes());
+        feed(&[0]);
+    }
+    if let Some(index) = index {
+        for e in &index.entries {
+            feed(format!("{}|{:?}|{:?}|{}|{};", e.file, e.min_ts, e.max_ts, e.bytes, e.column_chunks).as_bytes());
+        }
+    }
+    format!("{hash:016x}")
 }
 
 /// Discover, schema-detect and register one source's `normalized_cost` view
@@ -151,6 +181,7 @@ pub fn register_source(source: &DataSource, secret: Option<&str>) -> Result<Regi
     }
     drop(conn);
 
+    let fingerprint = data_fingerprint(&files, scan_index.as_deref());
     Ok(Registered {
         repo: Arc::new(DuckDbCostRepository::new(pool)),
         detected_format: detected_format.to_string(),
@@ -158,6 +189,7 @@ pub fn register_source(source: &DataSource, secret: Option<&str>) -> Result<Regi
         billing_periods,
         remote: source.is_s3(),
         scan_index,
+        fingerprint,
     })
 }
 
@@ -168,6 +200,23 @@ mod tests {
 
     fn local(dir: &std::path::Path) -> DataSource {
         DataSource { id: "t".into(), name: "T".into(), s3_uri: dir.to_str().unwrap().into(), ..Default::default() }
+    }
+
+    #[test]
+    fn fingerprint_changes_with_files_or_footers_but_is_stable() {
+        use data::scan_index::{RowGroupEntry, ScanIndex};
+        let files = vec!["a.parquet".to_string(), "b.parquet".to_string()];
+        let index = |bytes| ScanIndex {
+            entries: vec![RowGroupEntry { file: 0, min_ts: None, max_ts: None, bytes, column_chunks: 3 }],
+            file_count: 2,
+        };
+        let base = data_fingerprint(&files, Some(&index(100)));
+        assert_eq!(base.len(), 16);
+        assert_eq!(base, data_fingerprint(&files, Some(&index(100))));
+        assert_ne!(base, data_fingerprint(&files, Some(&index(101))), "a rewritten file changes its footer");
+        assert_ne!(base, data_fingerprint(&files[..1], Some(&index(100))));
+        let reversed: Vec<String> = files.iter().rev().cloned().collect();
+        assert_eq!(base, data_fingerprint(&reversed, Some(&index(100))), "file order doesn't matter");
     }
 
     #[test]

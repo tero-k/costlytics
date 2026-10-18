@@ -26,6 +26,8 @@ pub struct SourceScan {
     pub remote: bool,
     /// `None` when the source's footers could not be indexed.
     pub index: Option<Arc<ScanIndex>>,
+    /// See [`Registered::fingerprint`].
+    pub fingerprint: String,
 }
 
 /// One configured source's identity plus its registration outcome.
@@ -109,13 +111,19 @@ impl SourceRegistry {
         generation
     }
 
+    /// The id's current generation (see [`Self::mark_pending`]), for callers
+    /// that re-register in place without going through `Pending`.
+    pub fn generation(&self, id: &str) -> Option<u64> {
+        self.read().diagnostics.iter().find(|d| d.id == id).map(|d| d.generation)
+    }
+
     /// Applies `result` to `id`'s diagnostic at `pos`, shared by
     /// [`Self::set_result`] and [`Self::set_result_if_current`].
     fn apply_result(inner: &mut Inner, pos: usize, id: &str, result: Result<Registered, String>) {
         let status = match result {
             Ok(r) => {
                 inner.repos.insert(id.to_string(), r.repo);
-                inner.scans.insert(id.to_string(), SourceScan { remote: r.remote, index: r.scan_index });
+                inner.scans.insert(id.to_string(), SourceScan { remote: r.remote, index: r.scan_index, fingerprint: r.fingerprint });
                 SourceStatus::Registered {
                     detected_format: r.detected_format,
                     file_count: r.file_count,
@@ -219,7 +227,19 @@ mod tests {
             billing_periods: vec!["2026-08".into()],
             remote: false,
             scan_index: None,
+            fingerprint: "fp".into(),
         }
+    }
+
+    #[test]
+    fn generation_and_fingerprint_are_exposed() {
+        let reg = SourceRegistry::new();
+        assert_eq!(reg.generation("a"), None);
+        let g = reg.mark_pending(&source("a"));
+        assert_eq!(reg.generation("a"), Some(g));
+        reg.set_result_if_current("a", g, Ok(registered()));
+        assert_eq!(reg.generation("a"), Some(g), "applying a result doesn't bump the generation");
+        assert_eq!(reg.scan(Some("a")).unwrap().fingerprint, "fp");
     }
 
     #[test]
