@@ -2,6 +2,7 @@
 //! source registration and settings management. Called by the Tauri
 //! commands (`crates/app`) and the dev/test HTTP harness (`crates/api`).
 
+pub mod alerts;
 pub mod app;
 pub mod cost;
 pub mod error;
