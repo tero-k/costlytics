@@ -93,12 +93,16 @@ function confirmScan(usd: number): Promise<boolean> {
   document.body.append(dialog);
   dialog.showModal();
   return new Promise((resolve) => {
+    // Escape closes a modal dialog natively; treat that as Cancel.
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      resolve(false);
+    });
     dialog.addEventListener('click', (e) => {
       const answer = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-answer]')?.dataset.answer;
       if (!answer) return;
-      dialog.close();
-      dialog.remove();
       resolve(answer === 'yes');
+      dialog.close();
     });
   });
 }
@@ -106,7 +110,11 @@ function confirmScan(usd: number): Promise<boolean> {
 function summarize(results: CheckResult[]): string {
   const found = results.reduce((n, r) => n + (r.kind === 'ok' ? r.new_anomalies : 0), 0);
   const failed = results.filter((r) => r.kind === 'error').length;
-  return failed ? `Check finished with ${failed} failed source(s).` : `Check finished: ${found} new anomal${found === 1 ? 'y' : 'ies'}.`;
+  const skipped = results.filter((r) => r.kind === 'needs_confirmation').length;
+  const tail = skipped ? ` ${skipped} source(s) skipped.` : '';
+  if (failed) return `Check finished with ${failed} failed source(s).${tail}`;
+  if (skipped && found === 0) return `Check skipped for ${skipped} source(s).`;
+  return `Check finished: ${found} new anomal${found === 1 ? 'y' : 'ies'}.${tail}`;
 }
 
 async function onCheckNow(): Promise<void> {
