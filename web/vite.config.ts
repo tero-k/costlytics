@@ -45,16 +45,16 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      // Eight pages: the Overview dashboard (`index.html`), the Cost
+      // Nine pages: the Overview dashboard (`index.html`), the Cost
       // Explorer (`explorer.html`), the Service Detail drilldown
       // (`service-detail.html`), the Account Detail drilldown
       // (`account-detail.html`), the Cost Changes page
       // (`cost-changes.html`), the Tags drilldown page (`tags.html`,
       // Session 15 Task 2), the Resources drilldown
-      // (`resource-detail.html`), and the Settings page (`settings.html`), which
-      // replaced the Data Sources page, sharing the same shared/ modules
+      // (`resource-detail.html`), the Anomalies inbox (`anomalies.html`), and the Settings page
+      // (`settings.html`), which replaced the Data Sources page, sharing the same shared/ modules
       // and stylesheet. Vite's default single-entry build only picks up
-      // `index.html`, so all eight must be listed explicitly here.
+      // `index.html`, so all nine must be listed explicitly here.
       input: {
         index: resolve(rootDir, 'index.html'),
         explorer: resolve(rootDir, 'explorer.html'),
@@ -64,6 +64,7 @@ export default defineConfig({
         settings: resolve(rootDir, 'settings.html'),
         tags: resolve(rootDir, 'tags.html'),
         resourceDetail: resolve(rootDir, 'resource-detail.html'),
+        anomalies: resolve(rootDir, 'anomalies.html'),
       },
     },
   },

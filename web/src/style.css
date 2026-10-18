@@ -169,6 +169,19 @@ body {
   font-weight: 600;
 }
 
+.nav-badge {
+  margin-left: auto;
+  min-width: 1.4rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--color-danger);
+  color: var(--color-surface);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4rem;
+  text-align: center;
+}
+
 .app-nav .icon {
   flex-shrink: 0;
 }
@@ -1034,7 +1047,8 @@ main > [hidden],
 /* These tables sit inside a `.chart-section` card already. */
 #explorer-table,
 #sources-table,
-#changes-table {
+#changes-table,
+#anomaly-list {
   overflow-x: auto;
   margin: 0 -1.1rem -1.1rem;
   border-top: 1px solid var(--color-border);
@@ -1376,3 +1390,38 @@ main > [hidden],
     border-left-color: #199e70;
   }
 }
+
+/* ---- Anomalies (anomaliesMain.ts) ---- */
+
+.run-status {
+  margin: 0 0 var(--spacing);
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.severity-pill {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.severity-pill.severity-high { background: var(--color-danger-soft); color: var(--color-danger); }
+.severity-pill.severity-medium { background: var(--color-warning-bg); color: var(--color-warning); }
+.severity-pill.severity-low { background: var(--color-accent-soft); color: var(--color-accent-ink); }
+.escalated-tag {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-danger);
+}
+
+.row-dim { opacity: 0.6; }
+.row-actions { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.cell-sub { color: var(--color-text-muted); font-size: 0.8rem; }
+
+.sparkline path { fill: none; stroke-width: 1.5; }
+.sparkline .spark-actual { stroke: var(--color-danger); }
+.sparkline .spark-expected { stroke: var(--color-text-muted); stroke-dasharray: 2 2; }

@@ -26,12 +26,14 @@ import { DATE_PRESETS, matchingPresets, presetRange, type PresetId } from './dat
 import { initStatusBar } from './statusBar.ts';
 import { escapeHtml } from './html.ts';
 import { appVersionLabel } from './version.ts';
+import { initAnomalyBadge } from './anomalyBadge.ts';
 
 interface NavItem {
   page: string;
   href: string;
   label: string;
   icon: string;
+  badge?: string;
 }
 
 interface NavGroup {
@@ -49,6 +51,7 @@ const ICONS = {
   resource: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>',
   tags: '<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8Z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
+  anomalies: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
   logo: '<path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/>',
 } as const;
 
@@ -59,6 +62,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { page: 'overview', href: '/', label: 'Overview', icon: ICONS.overview },
       { page: 'explorer', href: '/explorer.html', label: 'Cost Explorer', icon: ICONS.explorer },
       { page: 'cost-changes', href: '/cost-changes.html', label: 'Cost Changes', icon: ICONS.changes },
+      { page: 'anomalies', href: '/anomalies.html', label: 'Anomalies', icon: ICONS.anomalies, badge: 'anomalies' },
     ],
   },
   {
@@ -87,7 +91,8 @@ function renderSidebar(activePage: string): HTMLElement {
     const links = group.items
       .map((item) => {
         const active = item.page === activePage;
-        return `<a href="${item.href}"${active ? ' class="active" aria-current="page"' : ''}>${svgIcon(item.icon)}<span>${item.label}</span></a>`;
+        const badge = item.badge ? `<span class="nav-badge" id="nav-badge-${item.badge}" hidden></span>` : '';
+        return `<a href="${item.href}"${active ? ' class="active" aria-current="page"' : ''}>${svgIcon(item.icon)}<span>${item.label}</span>${badge}</a>`;
       })
       .join('');
     const heading = group.label ? `<div class="nav-group-label">${group.label}</div>` : '';
@@ -230,4 +235,6 @@ export function initAppShell(): void {
     initStatusBar();
     initPresets();
   }
+
+  initAnomalyBadge();
 }

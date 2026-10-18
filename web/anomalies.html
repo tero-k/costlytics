@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Costlytics — Anomalies</title>
+  </head>
+  <body>
+    <!-- Sidebar and header are rendered by src/shared/appShell.ts. -->
+    <div id="app" data-page="anomalies" data-shared="false">
+      <div class="status-bar" id="status-bar">
+        <span class="status-loading" id="status-loading" hidden>Loading&hellip;</span>
+      </div>
+      <main>
+        <section class="chart-section">
+          <div class="chart-header">
+            <h2>Spend anomalies</h2>
+            <label class="control inline"><input type="checkbox" id="show-all" /> <span>Show acknowledged and muted</span></label>
+            <button type="button" class="button-primary" id="check-now">Check now</button>
+          </div>
+          <p class="cell-sub" id="anomaly-scope-note">Usage charges only (excludes tax, purchases, credits and refunds).</p>
+          <ul id="run-status" class="run-status"></ul>
+          <div id="anomaly-message" class="form-result" role="status"></div>
+          <div id="anomaly-list"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/anomaliesMain.ts"></script>
+  </body>
+</html>
