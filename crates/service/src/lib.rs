@@ -6,6 +6,7 @@ pub mod alerts;
 pub mod app;
 pub mod cost;
 pub mod error;
+pub mod monitor;
 pub mod register;
 pub mod registry;
 pub mod secrets;
