@@ -327,6 +327,12 @@ impl CostlyticsService {
             treat_local_as_remote: self.treat_local_as_remote,
         };
         let result = self.monitor.check(&ctx, id, mode, Utc::now());
+        // The source may have been deleted while the check ran; drop what it wrote.
+        if self.find(id).is_none() {
+            if let Err(e) = self.alerts.forget_source(id) {
+                tracing::warn!(source_id = %id, error = %e, "could not drop a deleted source's anomalies");
+            }
+        }
         tracing::info!(source_id = %id, outcome = ?result.outcome, "anomaly check");
         result
     }
@@ -358,7 +364,9 @@ impl CostlyticsService {
     pub fn anomalies(&self) -> AnomaliesResponse {
         let config = self.config();
         let state = self.alerts.snapshot(Utc::now().date_naive());
-        let mut anomalies = state.anomalies;
+        // Only configured sources count; a check racing a delete can leave orphans.
+        let mut anomalies: Vec<Anomaly> =
+            state.anomalies.into_iter().filter(|a| config.sources.iter().any(|s| s.id == a.source_id)).collect();
         anomalies.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.last_day.cmp(&a.last_day)));
         let open_count = anomalies
             .iter()
@@ -372,10 +380,12 @@ impl CostlyticsService {
         AnomaliesResponse { enabled: config.anomaly.enabled, open_count, anomalies, runs }
     }
 
+    /// Marks one anomaly acknowledged (it reopens if its severity later rises).
     pub fn acknowledge_anomaly(&self, req: AnomalyIdRequest) -> Result<Anomaly, ServiceError> {
         self.alerts.acknowledge(&req.id, Utc::now())
     }
 
+    /// Mutes a service or account of one source for `days` (1..=365) days.
     pub fn mute_anomaly_scope(&self, req: MuteRequest) -> Result<AnomaliesResponse, ServiceError> {
         if !(1..=365).contains(&req.days) {
             return Err(ServiceError::bad_request("days must be between 1 and 365"));
@@ -393,6 +403,7 @@ impl CostlyticsService {
         Ok(self.anomalies())
     }
 
+    /// Validates and persists the anomaly detection settings.
     pub fn save_anomaly_config(&self, cfg: AnomalyConfig) -> Result<AnomalyConfig, ServiceError> {
         cfg.validate().map_err(ServiceError::bad_request)?;
         // See `save_source` for why the read-modify-write is serialized.
@@ -418,12 +429,17 @@ impl CostlyticsService {
                     continue;
                 }
                 last = std::time::Instant::now();
-                for source in self.config().sources {
-                    if let Err(e) = self.refresh_source(&source.id) {
-                        tracing::warn!(source_id = %source.id, error = %e, "periodic source refresh failed");
+                let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for source in self.config().sources {
+                        if let Err(e) = self.refresh_source(&source.id) {
+                            tracing::warn!(source_id = %source.id, error = %e, "periodic source refresh failed");
+                        }
                     }
+                    self.check_auto_all();
+                }));
+                if tick.is_err() {
+                    tracing::error!("periodic anomaly check panicked; will retry at the next interval");
                 }
-                self.check_auto_all();
             }
         });
     }
@@ -972,19 +988,43 @@ mod tests {
                 days: 7,
             })
             .unwrap();
-        assert!(muted.open_count <= 2);
+        assert_eq!(muted.open_count, 2);
+        assert!(muted.anomalies.iter().any(|a| a.muted && a.scope_key == data::fixtures::ANOMALY_NEW_ACCOUNT));
         let bad = MuteRequest { source_id: "an".into(), scope_kind: ScopeKind::Account, scope_key: "x".into(), days: 0 };
         assert_eq!(f.svc.mute_anomaly_scope(bad).unwrap_err().kind, ErrorKind::BadRequest);
         let no_source = MuteRequest { source_id: " ".into(), scope_kind: ScopeKind::Account, scope_key: "x".into(), days: 7 };
         assert_eq!(f.svc.mute_anomaly_scope(no_source).unwrap_err().kind, ErrorKind::BadRequest);
 
         // A fresh service over the same settings path sees the persisted inbox.
-        let again = CostlyticsService::new(AppConfig::default(), Some(f.settings_path.clone()), f.secrets.clone());
+        let saved = AppConfig::load(f.settings_path.to_str().unwrap()).unwrap();
+        let again = CostlyticsService::new(saved, Some(f.settings_path.clone()), f.secrets.clone());
         assert_eq!(again.anomalies().anomalies.len(), 4);
 
         f.svc.delete_source(SourceIdRequest { id: "an".into() }).unwrap();
         let after = f.svc.anomalies();
         assert!(after.anomalies.is_empty() && after.runs.is_empty());
+        assert!(f.svc.alerts.snapshot(chrono::Utc::now().date_naive()).mutes.is_empty());
+    }
+
+    #[test]
+    fn anomalies_ignores_unconfigured_sources() {
+        use domain::anomaly::{AnomalyKind, Finding, Severity};
+        let f = fixture();
+        let day = chrono::Utc::now().date_naive();
+        let finding = Finding { day, expected: 1.0, actual: 100.0, delta: 99.0, kind: AnomalyKind::Spike, severity: Severity::High };
+        let scoped = [crate::alerts::ScopedFindings { scope_kind: ScopeKind::Service, scope_key: "S".into(), findings: vec![finding] }];
+        let run = crate::alerts::RunState {
+            fingerprint: None,
+            last_checked_day: Some(day),
+            last_run_at: chrono::Utc::now(),
+            outcome: crate::alerts::RunOutcome::Ok,
+            estimate_usd: None,
+        };
+        f.svc.alerts.apply_run("gone", (day, day), &scoped, run, day, chrono::Utc::now()).unwrap();
+        assert_eq!(f.svc.alerts.snapshot(day).anomalies.len(), 1, "the orphan is in the store");
+        let inbox = f.svc.anomalies();
+        assert!(inbox.anomalies.is_empty() && inbox.runs.is_empty());
+        assert_eq!(inbox.open_count, 0);
     }
 
     #[test]
