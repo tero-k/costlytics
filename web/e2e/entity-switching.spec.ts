@@ -59,7 +59,9 @@ async function assertNoErrorState(page: Page): Promise<void> {
 async function countApiRequestsDuring(page: Page, action: () => Promise<void>): Promise<number> {
   let count = 0;
   const onRequest = (req: { url: () => string }): void => {
-    if (req.url().includes('/api/v1/')) count += 1;
+    const url = req.url();
+    // The sidebar's anomaly badge polls on a timer, independent of the switch being measured.
+    if (url.includes('/api/v1/') && !url.includes('/api/v1/anomalies')) count += 1;
   };
   page.on('request', onRequest);
   try {
