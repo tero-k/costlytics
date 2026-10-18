@@ -50,7 +50,15 @@ fn main() {
             app.manage(Arc::clone(&svc));
             // Register in the background so the window opens immediately;
             // pages wait on `pending` sources (web/src/shared/sourcePicker.ts).
-            std::thread::spawn(move || svc.register_all());
+            // Then check for anomalies and start the periodic monitor.
+            {
+                let svc = Arc::clone(&svc);
+                std::thread::spawn(move || {
+                    svc.register_all();
+                    svc.check_auto_all();
+                    svc.spawn_monitor();
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -72,6 +80,11 @@ fn main() {
             commands::settings_source_test,
             commands::settings_source_reload,
             commands::settings_cost_guard_save,
+            commands::anomalies,
+            commands::anomalies_run,
+            commands::anomalies_ack,
+            commands::anomalies_mute,
+            commands::settings_anomaly_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Costlytics");

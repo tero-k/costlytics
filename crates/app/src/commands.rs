@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use service::app::{
-    SaveSourceRequest, SettingsResponse, SourceIdRequest, TestSourceRequest, TestSourceResponse,
+    AnomaliesQuery, AnomaliesResponse, AnomalyIdRequest, MuteRequest, RunAnomaliesRequest, SaveSourceRequest, SettingsResponse, SourceIdRequest, TestSourceRequest, TestSourceResponse,
 };
-use data::config::CostGuardConfig;
+use data::config::{AnomalyConfig, CostGuardConfig};
+use service::alerts::Anomaly;
+use service::monitor::CheckResult;
 use service::cost::{
     self, BreakdownRequest, BreakdownResponse, CompareRequest, CompareResponse, EstimateRequest,
     EstimateResponse, FilterDimension,
@@ -105,7 +107,12 @@ pub async fn settings(svc: Svc<'_>) -> Result<SettingsResponse, ServiceError> {
 
 #[tauri::command]
 pub async fn settings_source_save(svc: Svc<'_>, req: SaveSourceRequest) -> Result<SourceEntry, ServiceError> {
-    blocking(&svc, move |s| s.save_source(req)).await
+    let id = req.source.id.clone();
+    let result = blocking(&svc, move |s| s.save_source(req)).await;
+    if result.is_ok() {
+        spawn_auto_check(&svc, id);
+    }
+    result
 }
 
 #[tauri::command]
@@ -120,10 +127,49 @@ pub async fn settings_source_test(svc: Svc<'_>, req: TestSourceRequest) -> Resul
 
 #[tauri::command]
 pub async fn settings_source_reload(svc: Svc<'_>, req: SourceIdRequest) -> Result<SourceEntry, ServiceError> {
-    blocking(&svc, move |s| s.reload_source(req)).await
+    let id = req.id.clone();
+    let result = blocking(&svc, move |s| s.reload_source(req)).await;
+    if result.is_ok() {
+        spawn_auto_check(&svc, id);
+    }
+    result
 }
 
 #[tauri::command]
 pub async fn settings_cost_guard_save(svc: Svc<'_>, req: CostGuardConfig) -> Result<CostGuardConfig, ServiceError> {
     blocking(&svc, move |s| s.save_cost_guard(req)).await
+}
+
+/// After a source (re)registers, check it for anomalies off the UI thread.
+fn spawn_auto_check(svc: &Svc<'_>, id: String) {
+    let svc = Arc::clone(svc.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        svc.check_auto(&id);
+    });
+}
+
+#[tauri::command]
+pub async fn anomalies(svc: Svc<'_>, req: AnomaliesQuery) -> Result<AnomaliesResponse, ServiceError> {
+    let _ = req;
+    blocking(&svc, |s| Ok(s.anomalies())).await
+}
+
+#[tauri::command]
+pub async fn anomalies_run(svc: Svc<'_>, req: RunAnomaliesRequest) -> Result<Vec<CheckResult>, ServiceError> {
+    blocking(&svc, move |s| s.run_anomaly_check(req)).await
+}
+
+#[tauri::command]
+pub async fn anomalies_ack(svc: Svc<'_>, req: AnomalyIdRequest) -> Result<Anomaly, ServiceError> {
+    blocking(&svc, move |s| s.acknowledge_anomaly(req)).await
+}
+
+#[tauri::command]
+pub async fn anomalies_mute(svc: Svc<'_>, req: MuteRequest) -> Result<AnomaliesResponse, ServiceError> {
+    blocking(&svc, move |s| s.mute_anomaly_scope(req)).await
+}
+
+#[tauri::command]
+pub async fn settings_anomaly_save(svc: Svc<'_>, req: AnomalyConfig) -> Result<AnomalyConfig, ServiceError> {
+    blocking(&svc, move |s| s.save_anomaly_config(req)).await
 }

@@ -568,3 +568,64 @@ async fn http_resource_search_finds_fixture_resource() {
 
     assert_eq!(json["values"], serde_json::json!(["i-abc123", "bucket-abc"]), "{json}");
 }
+
+async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(body.map_or_else(Body::empty, |b| Body::from(serde_json::to_vec(&b).unwrap())))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+async fn http_anomalies_list_run_ack_mute_and_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let end = chrono::Utc::now().date_naive() - chrono::Duration::days(1);
+    data::fixtures::generate_anomaly_fixture(dir.path(), end).unwrap();
+    let config = AppConfig {
+        sources: vec![DataSource {
+            id: "an".into(),
+            name: "Anomaly fixture".into(),
+            s3_uri: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let app = build_app(config).unwrap();
+
+    // The harness runs an automatic check at startup.
+    let (status, inbox) = call(&app, "GET", "/api/v1/anomalies", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inbox["open_count"], 4, "{inbox}");
+    assert_eq!(inbox["runs"][0]["run"]["outcome"]["kind"], "ok");
+
+    let (status, results) = call(&app, "POST", "/api/v1/anomalies/run", Some(serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(results[0]["kind"], "ok");
+    assert_eq!(results[0]["source_id"], "an");
+
+    let id = inbox["anomalies"][0]["id"].as_str().unwrap().to_string();
+    let (status, acked) = call(&app, "POST", "/api/v1/anomalies/ack", Some(serde_json::json!({ "id": id }))).await;
+    assert_eq!((status, acked["status"].as_str()), (StatusCode::OK, Some("acknowledged")));
+    let (status, _) = call(&app, "POST", "/api/v1/anomalies/ack", Some(serde_json::json!({ "id": "nope" }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let mute = serde_json::json!({ "source_id": "an", "scope_kind": "service", "scope_key": data::fixtures::ANOMALY_NEW_SERVICE, "days": 30 });
+    let (status, after) = call(&app, "POST", "/api/v1/anomalies/mute", Some(mute)).await;
+    assert_eq!((status, after["open_count"].as_u64()), (StatusCode::OK, Some(2)));
+
+    let (_, settings) = call(&app, "GET", "/api/v1/settings", None).await;
+    let mut rules = settings["anomaly"].clone();
+    rules["min_delta_usd"] = serde_json::json!(35.0);
+    let (status, saved) = call(&app, "POST", "/api/v1/settings/anomaly-save", Some(rules.clone())).await;
+    assert_eq!((status, saved["min_delta_usd"].as_f64()), (StatusCode::OK, Some(35.0)));
+    rules["lookback_days"] = serde_json::json!(2);
+    let (status, err) = call(&app, "POST", "/api/v1/settings/anomaly-save", Some(rules)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"], "lookback_days must be between 14 and 90");
+}

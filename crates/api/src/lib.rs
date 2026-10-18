@@ -34,5 +34,7 @@ fn build(config: data::config::AppConfig, settings_path: Option<PathBuf>) -> any
             .with_local_treated_as_remote(local_as_remote),
     );
     svc.register_all();
+    // Synchronous initial check, so e2e specs see anomalies without waiting.
+    svc.check_auto_all();
     Ok(routes::build_router(svc))
 }

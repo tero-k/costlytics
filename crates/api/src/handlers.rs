@@ -5,9 +5,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use data::config::CostGuardConfig;
+use data::config::{AnomalyConfig, CostGuardConfig};
 use serde::Serialize;
-use service::app::{SaveSourceRequest, SourceIdRequest, TestSourceRequest};
+use service::app::{
+    AnomaliesQuery, AnomalyIdRequest, MuteRequest, RunAnomaliesRequest, SaveSourceRequest, SourceIdRequest,
+    TestSourceRequest,
+};
 use service::cost::{
     self, BreakdownRequest, CompareRequest, EstimateRequest, FilterDimension, FilterValuesQuery, ResourceSearchRequest,
     SummaryRequest, TagValuesQuery, TimeseriesRequest,
@@ -120,6 +123,26 @@ pub async fn settings_source_reload(State(s): State<AppState>, Json(req): Json<S
 
 pub async fn settings_cost_guard_save(State(s): State<AppState>, Json(req): Json<CostGuardConfig>) -> Response {
     run(move || s.save_cost_guard(req)).await
+}
+
+pub async fn anomalies(State(s): State<AppState>, Query(_q): Query<AnomaliesQuery>) -> Response {
+    run(move || Ok(s.anomalies())).await
+}
+
+pub async fn anomalies_run(State(s): State<AppState>, Json(req): Json<RunAnomaliesRequest>) -> Response {
+    run(move || s.run_anomaly_check(req)).await
+}
+
+pub async fn anomalies_ack(State(s): State<AppState>, Json(req): Json<AnomalyIdRequest>) -> Response {
+    run(move || s.acknowledge_anomaly(req)).await
+}
+
+pub async fn anomalies_mute(State(s): State<AppState>, Json(req): Json<MuteRequest>) -> Response {
+    run(move || s.mute_anomaly_scope(req)).await
+}
+
+pub async fn settings_anomaly_save(State(s): State<AppState>, Json(req): Json<AnomalyConfig>) -> Response {
+    run(move || s.save_anomaly_config(req)).await
 }
 
 // ---------------------------------------------------------------------------

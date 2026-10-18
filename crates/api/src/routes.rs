@@ -46,6 +46,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/settings/source-test", post(handlers::settings_source_test))
         .route("/api/v1/settings/source-reload", post(handlers::settings_source_reload))
         .route("/api/v1/settings/cost-guard-save", post(handlers::settings_cost_guard_save))
+        .route("/api/v1/anomalies", get(handlers::anomalies))
+        .route("/api/v1/anomalies/run", post(handlers::anomalies_run))
+        .route("/api/v1/anomalies/ack", post(handlers::anomalies_ack))
+        .route("/api/v1/anomalies/mute", post(handlers::anomalies_mute))
+        .route("/api/v1/settings/anomaly-save", post(handlers::settings_anomaly_save))
         .with_state(state);
 
     // Security headers via tower-http
