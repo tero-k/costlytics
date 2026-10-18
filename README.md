@@ -50,7 +50,12 @@ third-party service between you and your billing data.
 
 ## Installation
 
-There are no prebuilt downloads yet, so you build Costlytics from source.
+Download the latest version from the
+[Releases](https://github.com/tero-k/costlytics/releases) page: a Windows
+installer (`.exe` or `.msi`), a portable Windows `.zip`, or a signed and
+notarized macOS DMG for Apple Silicon (`aarch64`) or Intel (`x64`).
+
+To build Costlytics from source instead:
 
 **Prerequisites**
 
@@ -261,6 +266,9 @@ the open ones. **Check now** runs a check on demand.
 - **Monthly charges**: a charge that recurs on the same day each month (for
   example a monthly subscription billed as usage) is not reported again when
   last month had a similar charge.
+- **Irregular spend**: a service billed only now and then, without enough
+  history for a baseline, is compared with its largest day in the last
+  five weeks, so a runaway day still raises an anomaly.
 - **Drops**: decreases are off by default. Turn them on in the rules if you
   want to be told about them.
 - **Acknowledge, mute, open**: acknowledging hides an anomaly. If its
@@ -386,7 +394,16 @@ To cut a release:
    `## [X.Y.Z] - YYYY-MM-DD`.
 3. Commit with `git commit -am "chore(release): vX.Y.Z"`, then run
    `git tag -a vX.Y.Z -m "vX.Y.Z"` and `git push --follow-tags`.
-4. Build the installer with `cargo tauri build`.
+4. The tag starts the `macOS` workflow, which builds, signs and notarizes the
+   Apple Silicon and Intel DMGs and attaches them to the tag's GitHub release
+   (creating a draft release if there isn't one yet).
+5. Build the Windows installers with `cargo tauri build` on Windows, sign
+   them, upload them to the release, and publish it.
+
+The workflow signs with the Developer ID certificate in the `Release`
+environment's secrets (listed at the top of `.github/workflows/macos.yml`).
+Store the `.p12` export as it is: the workflow re-packs certificates exported
+with current AES-256 encryption into the format `security import` accepts.
 
 See [CHANGELOG.md](CHANGELOG.md) for the release history.
 
@@ -403,8 +420,8 @@ Issues and pull requests are welcome.
   [Conventional Commits](https://www.conventionalcommits.org/) style
   (`feat(web): …`, `fix(data): …`, `docs: …`). Add a line under `Unreleased`
   in `CHANGELOG.md` for any change a user would notice.
-- **Checks before a PR**: the repository has no CI, so run the checks
-  yourself and include the results in the PR:
+- **Checks before a PR**: the repository runs no tests in CI (the only
+  workflow builds release DMGs), so run the checks yourself and include the results in the PR:
 
   ```
   cargo test --workspace

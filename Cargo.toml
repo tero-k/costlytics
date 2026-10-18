@@ -12,7 +12,7 @@ members = [
 default-members = ["crates/domain", "crates/data", "crates/service", "crates/api"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/tero-k/costlytics"
