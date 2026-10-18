@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { Anomaly, SourceRun } from '../../api.ts';
+import type { Anomaly, CheckResult, SourceRun } from '../../api.ts';
 import {
-  badgeText, dateRangeLabel, detailHref, fractionToPct, kindLabel, MUTE_OPTIONS, pctToFraction,
+  badgeText, checkSummary, dateRangeLabel, detailHref, fractionToPct, kindLabel, MUTE_OPTIONS, pctToFraction,
   runStatusText, sortAnomalies, sparklinePaths, visibleAnomalies,
 } from '../anomalies.ts';
 
@@ -85,5 +85,18 @@ describe('anomaly list helpers', () => {
     expect(pctToFraction(25)).toBe(0.25);
     expect(fractionToPct(0.25)).toBe(25);
     expect(fractionToPct(0.125)).toBe(12.5);
+  });
+});
+
+describe('checkSummary', () => {
+  const ok = (id: string, n: number): CheckResult => ({ source_id: id, kind: 'ok', checked_from: null, checked_to: null, new_anomalies: n });
+
+  it('counts new anomalies when every check finished', () => {
+    expect(checkSummary([ok('a', 1), ok('b', 2)])).toBe('Check finished: 3 new anomalies.');
+  });
+
+  it('says a check is already running instead of reporting it as finished', () => {
+    const running: CheckResult = { source_id: 'b', kind: 'already_running' };
+    expect(checkSummary([ok('a', 0), running])).toBe('A check is already running for 1 source(s).');
   });
 });

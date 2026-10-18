@@ -3,7 +3,7 @@
  * rules form. No DOM, no fetching.
  */
 
-import type { Anomaly, AnomalyKind, AnomalyPoint, ScopeKind, Severity, SourceRun } from '../api.ts';
+import type { Anomaly, AnomalyKind, AnomalyPoint, CheckResult, ScopeKind, Severity, SourceRun } from '../api.ts';
 import { addDaysIso } from './dates.ts';
 import { formatCurrency } from './format.ts';
 
@@ -86,4 +86,17 @@ export function pctToFraction(pct: number): number {
 
 export function fractionToPct(fraction: number): number {
   return Math.round(fraction * 1e8) / 1e6;
+}
+
+/** The status line after "Check now". A source whose check was already in flight hasn't finished. */
+export function checkSummary(results: CheckResult[]): string {
+  const running = results.filter((r) => r.kind === 'already_running').length;
+  if (running) return `A check is already running for ${running} source(s).`;
+  const found = results.reduce((n, r) => n + (r.kind === 'ok' ? r.new_anomalies : 0), 0);
+  const failed = results.filter((r) => r.kind === 'error').length;
+  const skipped = results.filter((r) => r.kind === 'needs_confirmation').length;
+  const tail = skipped ? ` ${skipped} source(s) skipped.` : '';
+  if (failed) return `Check finished with ${failed} failed source(s).${tail}`;
+  if (skipped && found === 0) return `Check skipped for ${skipped} source(s).`;
+  return `Check finished: ${found} new anomal${found === 1 ? 'y' : 'ies'}.${tail}`;
 }

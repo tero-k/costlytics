@@ -1,12 +1,12 @@
 import './style.css';
 import {
   acknowledgeAnomaly, getAnomalies, muteAnomalyScope, runAnomalyCheck,
-  type AnomaliesResponse, type Anomaly, type CheckResult,
+  type AnomaliesResponse, type Anomaly,
 } from './api.ts';
 import { initAppShell } from './shared/appShell.ts';
 import { refreshAnomalyBadge } from './shared/anomalyBadge.ts';
 import {
-  dateRangeLabel, detailHref, kindLabel, MUTE_OPTIONS, runStatusText, scopeLabel,
+  checkSummary, dateRangeLabel, detailHref, kindLabel, MUTE_OPTIONS, runStatusText, scopeLabel,
   sortAnomalies, sparklinePaths, visibleAnomalies,
 } from './shared/anomalies.ts';
 import { errorMessage, formatCurrency, formatSignedCurrency } from './shared/format.ts';
@@ -107,16 +107,6 @@ function confirmScan(usd: number): Promise<boolean> {
   });
 }
 
-function summarize(results: CheckResult[]): string {
-  const found = results.reduce((n, r) => n + (r.kind === 'ok' ? r.new_anomalies : 0), 0);
-  const failed = results.filter((r) => r.kind === 'error').length;
-  const skipped = results.filter((r) => r.kind === 'needs_confirmation').length;
-  const tail = skipped ? ` ${skipped} source(s) skipped.` : '';
-  if (failed) return `Check finished with ${failed} failed source(s).${tail}`;
-  if (skipped && found === 0) return `Check skipped for ${skipped} source(s).`;
-  return `Check finished: ${found} new anomal${found === 1 ? 'y' : 'ies'}.${tail}`;
-}
-
 async function onCheckNow(): Promise<void> {
   const button = $<HTMLButtonElement>('#check-now');
   button.disabled = true;
@@ -128,7 +118,7 @@ async function onCheckNow(): Promise<void> {
         results = results.filter((x) => x.source_id !== r.source_id).concat(await runAnomalyCheck(r.source_id, true));
       }
     }
-    setMessage(summarize(results), !results.some((r) => r.kind === 'error'));
+    setMessage(checkSummary(results), !results.some((r) => r.kind === 'error'));
     await refresh();
   } catch (err) {
     setMessage(errorMessage(err), false);

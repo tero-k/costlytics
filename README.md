@@ -258,6 +258,9 @@ the open ones. **Check now** runs a check on demand.
   finalized, so they are left out of the comparison until they settle.
 - **Usage charges only**: tax, purchases, credits and refunds are excluded, so
   monthly Tax, Support and commitment fees don't raise anomalies.
+- **Monthly charges**: a charge that recurs on the same day each month (for
+  example a monthly subscription billed as usage) is not reported again when
+  last month had a similar charge.
 - **Drops**: decreases are off by default. Turn them on in the rules if you
   want to be told about them.
 - **Acknowledge, mute, open**: acknowledging hides an anomaly. If its
@@ -307,7 +310,7 @@ and contains known anomalies for the Anomalies page.
 
 Instead of the desktop app, you can run the frontend in a browser against the
 HTTP harness. The harness reads `COSTLYTICS_CONFIG` (default
-`config/example.toml`), which registers the three fixture sources.
+`config/example.toml`), which registers the four fixture sources.
 
 ```
 cargo run -p api          # backend on http://127.0.0.1:3000
