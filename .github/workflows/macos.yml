@@ -6,7 +6,8 @@
 # artifacts. Windows installers are signed and uploaded by hand.
 #
 # Uses the secrets of the `Release` environment:
-#   MACOS_CERTIFICATE_BASE64    Developer ID Application certificate (.p12), base64
+#   MACOS_CERTIFICATE_BASE64    Developer ID Application certificate (.p12), base64;
+#                               any export works, old (3DES/RC2) or new (AES-256)
 #   MACOS_CERTIFICATE_PASSWORD  password of the .p12
 #   APPLE_ID                    Apple ID used for notarization
 #   APPLE_PASSWORD              app-specific password of that Apple ID
@@ -19,8 +20,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Read-only by default: the build job holds the signing secrets and runs
+# third-party build tooling, so it gets no write token. Only `release` writes.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: macos-${{ github.ref }}
@@ -64,15 +67,35 @@ jobs:
 
       # Tauri imports the certificate into a temporary keychain, signs the
       # app and the DMG, and notarizes and staples the app.
+      #
+      # Its import uses `security import`, which can't read .p12 files with
+      # current encryption (AES-256 / SHA-256 MAC, the default for new
+      # Developer ID exports), so the certificate is first re-packed with
+      # 3DES / SHA-1 (.github/scripts/legacy-p12.sh). The re-packed value is
+      # derived from a secret, so GitHub doesn't mask it by itself: it is
+      # masked explicitly and stays inside this step, never in $GITHUB_ENV.
       - name: Build and sign
         working-directory: crates/app
         env:
-          APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx --yes @tauri-apps/cli@2 build --target ${{ matrix.target }} --bundles dmg
+        run: |
+          set -euo pipefail
+          # /usr/bin/openssl is LibreSSL; the conversion needs OpenSSL 3.
+          prefix=$(brew --prefix openssl@3 2>/dev/null || true)
+          if [ ! -x "$prefix/bin/openssl" ]; then
+            brew install openssl@3
+            prefix=$(brew --prefix openssl@3)
+          fi
+          APPLE_CERTIFICATE=$(OPENSSL="$prefix/bin/openssl" bash "$GITHUB_WORKSPACE/.github/scripts/legacy-p12.sh")
+          echo "::add-mask::$APPLE_CERTIFICATE"
+          export APPLE_CERTIFICATE
+          unset P12_BASE64 P12_PASSWORD
+          npx --yes @tauri-apps/cli@2 build --target ${{ matrix.target }} --bundles dmg
 
       - name: Locate DMG
         id: dmg
@@ -116,6 +139,8 @@ jobs:
     needs: build
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v5
         with:
