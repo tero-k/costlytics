@@ -240,12 +240,17 @@ impl AlertStore {
     }
 
     /// Loads `path` (missing = empty; corrupt or unknown version =
-    /// quarantined and empty), prunes and applies mutes.
+    /// quarantined and empty), prunes and applies mutes. When the file can't
+    /// be read or moved aside, the store runs in memory for this session so
+    /// the real file is never overwritten.
     pub fn open(path: PathBuf, today: NaiveDate) -> Self {
-        let mut state = load(&path);
+        let (mut state, persist) = match load(&path) {
+            Loaded::State(state) => (state, true),
+            Loaded::Unavailable => (AlertState::default(), false),
+        };
         prune(&mut state, today);
         apply_mutes(&mut state, today);
-        Self { path: Some(path), state: Mutex::new(state) }
+        Self { path: persist.then_some(path), state: Mutex::new(state) }
     }
 
     fn lock(&self) -> MutexGuard<'_, AlertState> {
@@ -335,34 +340,44 @@ impl AlertStore {
     }
 }
 
-fn load(path: &std::path::Path) -> AlertState {
+enum Loaded {
+    /// Safe to persist to the path: the file was valid, missing or quarantined.
+    State(AlertState),
+    /// The file exists but couldn't be read or moved aside; don't touch it.
+    Unavailable,
+}
+
+fn load(path: &std::path::Path) -> Loaded {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AlertState::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded::State(AlertState::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return quarantine(path, &e.to_string()),
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "could not read alerts file; starting empty");
-            return AlertState::default();
+            tracing::warn!(path = %path.display(), error = %e, "could not read alerts file; keeping alerts in memory for this session");
+            return Loaded::Unavailable;
         }
     };
     match serde_json::from_str::<AlertState>(&text) {
-        Ok(state) if state.version == ALERTS_FILE_VERSION => state,
-        Ok(state) => {
-            quarantine(path, &format!("unknown version {}", state.version));
-            AlertState::default()
-        }
-        Err(e) => {
-            quarantine(path, &e.to_string());
-            AlertState::default()
-        }
+        Ok(state) if state.version == ALERTS_FILE_VERSION => Loaded::State(state),
+        Ok(state) => quarantine(path, &format!("unknown version {}", state.version)),
+        Err(e) => quarantine(path, &e.to_string()),
     }
 }
 
-/// Keeps an unreadable alerts file for inspection instead of crashing or silently overwriting it.
-fn quarantine(path: &std::path::Path, reason: &str) {
+/// Keeps an unreadable alerts file for inspection instead of crashing or
+/// silently overwriting it. If it can't be moved aside, the store must not
+/// persist, or the next write would replace it.
+fn quarantine(path: &std::path::Path, reason: &str) -> Loaded {
     let target = path.with_file_name(format!("alerts.corrupt-{}.json", Utc::now().format("%Y%m%dT%H%M%S")));
     match std::fs::rename(path, &target) {
-        Ok(()) => tracing::warn!(path = %path.display(), moved_to = %target.display(), %reason, "alerts file unreadable; starting empty"),
-        Err(e) => tracing::warn!(path = %path.display(), error = %e, %reason, "alerts file unreadable and could not be moved aside"),
+        Ok(()) => {
+            tracing::warn!(path = %path.display(), moved_to = %target.display(), %reason, "alerts file unreadable; starting empty");
+            Loaded::State(AlertState::default())
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, %reason, "alerts file unreadable and could not be moved aside; keeping alerts in memory for this session");
+            Loaded::Unavailable
+        }
     }
 }
 
@@ -535,6 +550,38 @@ mod tests {
             assert_eq!(quarantined.len(), 1, "{content}");
             assert!(!path.exists());
         }
+    }
+
+    #[test]
+    fn invalid_utf8_file_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerts.json");
+        std::fs::write(&path, [0xff, 0xfe, b'{', 0x80]).unwrap();
+        let store = AlertStore::open(path.clone(), today());
+        assert!(store.snapshot(today()).anomalies.is_empty());
+        let quarantined = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("alerts.corrupt-") && n.ends_with(".json"))
+            .count();
+        assert_eq!(quarantined, 1);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unreadable_file_opens_in_memory_and_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory can't be read as a file: the error is neither NotFound nor InvalidData.
+        let path = dir.path().join("alerts.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("marker"), "keep").unwrap();
+        let store = AlertStore::open(path.clone(), today());
+        store.apply_run("s", (d(10), d(10)), &[scoped("EC2", vec![finding(10, 30.0)])], run(10), today(), now()).unwrap();
+        assert_eq!(store.snapshot(today()).anomalies.len(), 1, "the session still works in memory");
+        assert!(path.is_dir(), "the unreadable path is left alone");
+        assert_eq!(std::fs::read_to_string(path.join("marker")).unwrap(), "keep");
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(names, ["alerts.json"], "no temp or quarantine files are created");
     }
 
     #[test]
