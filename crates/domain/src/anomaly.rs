@@ -3,7 +3,9 @@
 //! A day is anomalous only when it is BOTH statistically unusual against a
 //! robust baseline (weekday-adjusted median, MAD spread) AND materially
 //! large (absolute, relative and optional monthly-impact floors), so a
-//! $0.10 → $1 jump never fires however large the ratio. See
+//! $0.10 → $1 jump never fires however large the ratio. A series too
+//! sparse for a baseline is compared against its largest recent day, and an
+//! upward finding that repeats last month's same-day charge is dropped. See
 //! `docs/superpowers/specs/2026-10-18-spend-anomaly-detection-design.md`.
 
 use std::collections::BTreeMap;
@@ -212,7 +214,9 @@ fn candidate(series: &BTreeMap<NaiveDate, f64>, day: NaiveDate, rules: &Rules) -
     if history < MIN_HISTORY_DAYS || base <= 0.0 {
         let memory = i64::from(rules.lookback_days).max(MONTH_ECHO_REACH_DAYS);
         let prior_total = (1..=memory).map(|i| cost(day - Duration::days(i))).sum();
-        return new_spend(day, actual, prior_total, rules);
+        let largest = values.iter().copied().fold(0.0, f64::max);
+        return new_spend(day, actual, prior_total, rules)
+            .or_else(|| sporadic_spike(day, actual, largest, rules));
     }
 
     // Per-weekday factor relative to the overall median, indexed Mon=0..Sun=6.
@@ -274,6 +278,25 @@ fn new_spend(day: NaiveDate, actual: f64, prior_total: f64, rules: &Rules) -> Op
         delta: actual,
         kind: AnomalyKind::NewSpend,
         severity: severity(actual, rules),
+    })
+}
+
+/// No usable baseline but some spend in the window: fires when the day
+/// clears the window's largest day by the absolute, relative and
+/// monthly-impact floors.
+fn sporadic_spike(day: NaiveDate, actual: f64, largest: f64, rules: &Rules) -> Option<Finding> {
+    let delta = actual - largest;
+    let fires = largest > 0.0
+        && delta >= rules.min_delta_usd
+        && delta / largest >= rules.min_delta_pct
+        && delta * DAYS_PER_MONTH >= rules.min_monthly_impact_usd;
+    fires.then(|| Finding {
+        day,
+        expected: largest,
+        actual,
+        delta,
+        kind: AnomalyKind::Spike,
+        severity: severity(delta, rules),
     })
 }
 
@@ -524,6 +547,35 @@ mod tests {
         let f = evaluate_day(&s, d(2026, 9, 1), &Rules::default()).expect("fires");
         assert_eq!(f.kind, AnomalyKind::Spike);
         assert!((f.expected - 5.0).abs() < 1e-9);
+    }
+
+    /// $30 every 7 days before `check`: 4 days with data in a 28-day window.
+    fn weekly_job(check: NaiveDate) -> BTreeMap<NaiveDate, f64> {
+        (1..=4)
+            .map(|w| (check - Duration::days(7 * w), 30.0))
+            .collect()
+    }
+
+    #[test]
+    fn sporadic_series_spike_fires_against_its_largest_day() {
+        let mut s = weekly_job(CHECK());
+        s.insert(CHECK(), 5000.0);
+        let f = evaluate_day(&s, CHECK(), &Rules::default()).expect("fires");
+        assert_eq!(f.kind, AnomalyKind::Spike);
+        assert!((f.expected - 30.0).abs() < 1e-9);
+        assert!((f.delta - 4970.0).abs() < 1e-9);
+        assert_eq!(f.severity, Severity::High);
+    }
+
+    #[test]
+    fn sporadic_series_small_rise_does_not_fire() {
+        let mut s = weekly_job(CHECK());
+        s.insert(CHECK(), 40.0);
+        assert_eq!(
+            evaluate_day(&s, CHECK(), &Rules::default()),
+            None,
+            "delta 10 < 20"
+        );
     }
 
     #[test]
