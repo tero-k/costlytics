@@ -21,7 +21,8 @@ pub struct Registered {
     /// Row-group index for cost estimates; `None` if the source is empty or
     /// the footers could not be indexed (estimates then report "unknown").
     pub scan_index: Option<Arc<ScanIndex>>,
-    /// Identifies the exact data registered: file list + footer index. Changes when AWS delivers or rewrites files.
+    /// Identifies the exact data registered: file list + footer index. Changes
+    /// when AWS delivers or rewrites files.
     pub fingerprint: String,
 }
 

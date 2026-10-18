@@ -154,12 +154,24 @@ impl SourceRegistry {
     /// generation is still `generation` (i.e. no later `mark_pending` or a
     /// `remove` has superseded the `mark_pending` call that produced
     /// `generation`). Otherwise the result is silently discarded as stale.
-    pub fn set_result_if_current(&self, id: &str, generation: u64, result: Result<Registered, String>) {
+    pub fn set_result_if_current(&self, id: &str, generation: u64, result: Result<Registered, String>) -> bool {
         let mut inner = self.write();
         let Some(pos) = inner.diagnostics.iter().position(|d| d.id == id && d.generation == generation) else {
-            return;
+            return false;
         };
         Self::apply_result(&mut inner, pos, id, result);
+        true
+    }
+
+    /// `(generation, fingerprint)` read atomically for a source that is not
+    /// `Pending`; `None` if it is unknown or a registration is in flight.
+    pub fn refresh_snapshot(&self, id: &str) -> Option<(u64, Option<String>)> {
+        let inner = self.read();
+        let d = inner.diagnostics.iter().find(|d| d.id == id)?;
+        if matches!(d.status, SourceStatus::Pending) {
+            return None;
+        }
+        Some((d.generation, inner.scans.get(id).map(|s| s.fingerprint.clone())))
     }
 
     pub fn remove(&self, id: &str) {
@@ -275,6 +287,21 @@ mod tests {
         assert_eq!(reg.default_source_id().as_deref(), Some("b"));
         reg.set_result("a", Ok(registered())); // late result for a removed source
         assert_eq!(reg.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn stale_result_returns_false_and_keeps_scan() {
+        let reg = SourceRegistry::new();
+        let g0 = reg.mark_pending(&source("a"));
+        assert!(reg.set_result_if_current("a", g0, Ok(registered())));
+        let g1 = reg.mark_pending(&source("a"));
+        assert!(reg.refresh_snapshot("a").is_none(), "pending has no snapshot");
+        assert!(reg.set_result_if_current("a", g1, Ok(registered())));
+        let mut newer = registered();
+        newer.fingerprint = "other".into();
+        assert!(!reg.set_result_if_current("a", g0, Ok(newer)));
+        assert_eq!(reg.scan(Some("a")).unwrap().fingerprint, "fp");
+        assert_eq!(reg.refresh_snapshot("a"), Some((g1, Some("fp".to_string()))));
     }
 
     #[test]

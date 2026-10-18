@@ -399,11 +399,18 @@ impl CostlyticsService {
     /// pages), and a failure leaves the current registration untouched. A
     /// concurrent save/reload bumps the generation, so its result wins.
     pub fn refresh_source(&self, id: &str) -> Result<bool, ServiceError> {
-        let source = self.find(id).ok_or_else(|| ServiceError::not_found(format!("unknown source '{id}'")))?;
-        let Some(generation) = self.registry.generation(id) else {
-            return Ok(false);
+        // Config and generation are captured together under `mutation` (as in
+        // `reload_source`), so a concurrent save can't be overwritten by a
+        // registration computed from the old config. Released before I/O.
+        let (source, generation, previous) = {
+            let _guard = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+            let source = self.find(id).ok_or_else(|| ServiceError::not_found(format!("unknown source '{id}'")))?;
+            // `None` while a save/reload registration is in flight: leave it be.
+            let Some((generation, previous)) = self.registry.refresh_snapshot(id) else {
+                return Ok(false);
+            };
+            (source, generation, previous)
         };
-        let previous = self.registry.scan(Some(id)).ok().map(|s| s.fingerprint);
         let secret = match source.auth {
             S3AuthConfig::AccessKey { .. } => self.stored_secret(&source.id),
             S3AuthConfig::CredentialChain => None,
@@ -412,8 +419,7 @@ impl CostlyticsService {
         if previous.as_deref() == Some(registered.fingerprint.as_str()) {
             return Ok(false);
         }
-        self.registry.set_result_if_current(id, generation, Ok(registered));
-        Ok(true)
+        Ok(self.registry.set_result_if_current(id, generation, Ok(registered)))
     }
 }
 
@@ -455,6 +461,16 @@ mod tests {
 
     fn save(f: &Fixture, source: DataSource, secret: Option<&str>, is_new: bool) -> Result<SourceEntry, ServiceError> {
         f.svc.save_source(SaveSourceRequest { source, secret: secret.map(String::from), is_new })
+    }
+
+    #[test]
+    fn refresh_source_skips_a_pending_source() {
+        let f = fixture();
+        save(&f, local("p", &f.fixture_path), None, true).unwrap();
+        let source = f.svc.find("p").unwrap();
+        f.svc.registry.mark_pending(&source);
+        assert!(!f.svc.refresh_source("p").unwrap());
+        assert!(matches!(f.svc.registry.diagnostics()[0].status, SourceStatus::Pending));
     }
 
     #[test]
