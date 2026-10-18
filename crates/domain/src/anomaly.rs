@@ -8,13 +8,18 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Datelike, Duration, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 /// Days with any cost row a series needs before it gets a statistical baseline.
 pub const MIN_HISTORY_DAYS: usize = 14;
 /// Projected monthly impact = daily delta × this.
 pub const DAYS_PER_MONTH: f64 = 30.0;
+/// Days before an evaluated day that detection may read beyond the lookback
+/// window: `new_spend` remembers this many days, and the month echo looks
+/// back one calendar month ± 1 day (at most 32 days). A check's query must
+/// reach `max(lookback_days, MONTH_ECHO_REACH_DAYS)` days before its first day.
+pub const MONTH_ECHO_REACH_DAYS: i64 = 35;
 /// Scales MAD to a standard-deviation equivalent for normally distributed data.
 const MAD_SCALE: f64 = 1.4826;
 /// Spread floor as a share of expected, so a perfectly flat series (MAD = 0)
@@ -145,6 +150,8 @@ pub fn severity(delta: f64, rules: &Rules) -> Severity {
 }
 
 /// Evaluates every day in `from..=to`. Days missing from `series` count as $0.
+/// The series should reach [`MONTH_ECHO_REACH_DAYS`] (or the lookback, if
+/// longer) before `from`.
 pub fn detect(
     series: &BTreeMap<NaiveDate, f64>,
     from: NaiveDate,
@@ -157,11 +164,39 @@ pub fn detect(
         .collect()
 }
 
+/// One day's finding, if any. An upward finding is dropped when it echoes
+/// last month (see [`month_echo`]): a charge billed on the same day each
+/// month is not news.
 pub fn evaluate_day(
     series: &BTreeMap<NaiveDate, f64>,
     day: NaiveDate,
     rules: &Rules,
 ) -> Option<Finding> {
+    candidate(series, day, rules).filter(|f| {
+        f.kind.direction() == Direction::Down || !month_echo(series, f.day, f.actual, rules)
+    })
+}
+
+/// Whether a day within one day of the same date last month (chrono clamps
+/// the 31st to the month's end) cost at least `(1 − min_delta_pct) × actual`.
+fn month_echo(
+    series: &BTreeMap<NaiveDate, f64>,
+    day: NaiveDate,
+    actual: f64,
+    rules: &Rules,
+) -> bool {
+    let Some(center) = day.checked_sub_months(Months::new(1)) else {
+        return false;
+    };
+    let threshold = (1.0 - rules.min_delta_pct) * actual;
+    (-1..=1)
+        .map(|i| center + Duration::days(i))
+        .filter_map(|d| series.get(&d))
+        // A day without spend never echoes, even when `min_delta_pct` ≥ 1 makes the threshold ≤ 0.
+        .any(|&c| c > 0.0 && c >= threshold)
+}
+
+fn candidate(series: &BTreeMap<NaiveDate, f64>, day: NaiveDate, rules: &Rules) -> Option<Finding> {
     let cost = |d: NaiveDate| series.get(&d).copied().unwrap_or(0.0);
     let window: Vec<NaiveDate> = (1..=i64::from(rules.lookback_days))
         .map(|i| day - Duration::days(i))
@@ -175,7 +210,9 @@ pub fn evaluate_day(
     let base = median(&values);
 
     if history < MIN_HISTORY_DAYS || base <= 0.0 {
-        return new_spend(day, actual, values.iter().sum(), rules);
+        let memory = i64::from(rules.lookback_days).max(MONTH_ECHO_REACH_DAYS);
+        let prior_total = (1..=memory).map(|i| cost(day - Duration::days(i))).sum();
+        return new_spend(day, actual, prior_total, rules);
     }
 
     // Per-weekday factor relative to the overall median, indexed Mon=0..Sun=6.
@@ -223,7 +260,8 @@ pub fn evaluate_day(
     })
 }
 
-/// No usable baseline: fires only for spend that appears out of (almost) nothing.
+/// No usable baseline: fires only for spend that appears out of (almost)
+/// nothing in the last `max(lookback_days, MONTH_ECHO_REACH_DAYS)` days.
 fn new_spend(day: NaiveDate, actual: f64, prior_total: f64, rules: &Rules) -> Option<Finding> {
     let fires = actual > 0.0
         && actual >= rules.min_delta_usd
@@ -433,6 +471,59 @@ mod tests {
         assert_eq!(severity(9.99, &rules), Severity::Low);
         assert_eq!(severity(10.0, &rules), Severity::Medium);
         assert_eq!(severity(-20.0, &rules), Severity::High);
+    }
+
+    /// `base` per day from `start` through `end`, plus `lump` on the 1st of each month.
+    fn base_with_monthly_lump(
+        start: NaiveDate,
+        end: NaiveDate,
+        base: f64,
+        lump: f64,
+    ) -> BTreeMap<NaiveDate, f64> {
+        start
+            .iter_days()
+            .take_while(|day| *day <= end)
+            .map(|day| (day, base + if day.day() == 1 { lump } else { 0.0 }))
+            .filter(|(_, cost)| *cost > 0.0)
+            .collect()
+    }
+
+    #[test]
+    fn monthly_lump_alone_fires_only_the_first_month() {
+        let s = base_with_monthly_lump(d(2026, 8, 1), d(2026, 9, 30), 0.0, 300.0);
+        let findings = detect(&s, d(2026, 8, 1), d(2026, 9, 30), &Rules::default());
+        assert_eq!(
+            findings.iter().map(|f| (f.day, f.kind)).collect::<Vec<_>>(),
+            [(d(2026, 8, 1), AnomalyKind::NewSpend)],
+            "September's lump echoes August's"
+        );
+    }
+
+    #[test]
+    fn monthly_lump_on_a_base_fires_only_the_first_month() {
+        let s = base_with_monthly_lump(d(2026, 7, 2), d(2026, 9, 30), 5.0, 200.0);
+        let findings = detect(&s, d(2026, 8, 1), d(2026, 9, 30), &Rules::default());
+        assert_eq!(
+            findings.iter().map(|f| (f.day, f.kind)).collect::<Vec<_>>(),
+            [(d(2026, 8, 1), AnomalyKind::Spike)],
+            "September's lump echoes August's"
+        );
+    }
+
+    #[test]
+    fn a_new_one_off_without_an_echo_still_fires() {
+        let s: BTreeMap<NaiveDate, f64> = [(d(2026, 9, 15), 300.0)].into();
+        let f = evaluate_day(&s, d(2026, 9, 15), &Rules::default()).expect("fires");
+        assert_eq!((f.kind, f.actual), (AnomalyKind::NewSpend, 300.0));
+    }
+
+    #[test]
+    fn a_lump_twice_last_months_still_fires() {
+        let mut s = base_with_monthly_lump(d(2026, 7, 2), d(2026, 9, 30), 5.0, 200.0);
+        s.insert(d(2026, 9, 1), 5.0 + 400.0);
+        let f = evaluate_day(&s, d(2026, 9, 1), &Rules::default()).expect("fires");
+        assert_eq!(f.kind, AnomalyKind::Spike);
+        assert!((f.expected - 5.0).abs() < 1e-9);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use data::config::{AnomalyConfig, CostGuardConfig};
-use domain::anomaly::{detect, DailySeriesRow, ScopeKind};
+use domain::anomaly::{detect, DailySeriesRow, ScopeKind, MONTH_ECHO_REACH_DAYS};
 use serde::Serialize;
 
 use crate::alerts::{AlertStore, RunOutcome, RunState, ScopedFindings};
@@ -81,8 +81,11 @@ pub fn check_window(
         Some(day) => (day + Duration::days(1)).min(recent).max(oldest),
         None => recent,
     };
+    // Detection reads the lookback and, for new-spend memory and the month
+    // echo, up to MONTH_ECHO_REACH_DAYS back; 2 more days of slack.
+    let reach = i64::from(lookback_days).max(MONTH_ECHO_REACH_DAYS) + 2;
     CheckWindow {
-        query_start: check_from - Duration::days(i64::from(lookback_days)),
+        query_start: check_from - Duration::days(reach),
         query_end: today + Duration::days(1),
         check_from,
     }
@@ -434,7 +437,13 @@ mod tests {
         let w = check_window(d(10, 1), None, 2, 28);
         assert_eq!(
             (w.check_from, w.query_start, w.query_end),
-            (d(9, 22), d(8, 25), d(10, 2))
+            (d(9, 22), d(8, 16), d(10, 2)),
+            "max(28, 35) + 2 days before check_from"
+        );
+        assert_eq!(
+            check_window(d(10, 1), None, 2, 60).query_start,
+            d(7, 22),
+            "a lookback over 35 days reaches lookback + 2"
         );
         assert_eq!(
             check_window(d(10, 1), Some(d(9, 27)), 2, 28).check_from,
