@@ -212,9 +212,13 @@ fn candidate(series: &BTreeMap<NaiveDate, f64>, day: NaiveDate, rules: &Rules) -
     let base = median(&values);
 
     if history < MIN_HISTORY_DAYS || base <= 0.0 {
+        // Both rules see the same days: spend that only new_spend remembers
+        // (beyond the window) would otherwise block it without giving the
+        // sporadic rule anything to compare against.
         let memory = i64::from(rules.lookback_days).max(MONTH_ECHO_REACH_DAYS);
-        let prior_total = (1..=memory).map(|i| cost(day - Duration::days(i))).sum();
-        let largest = values.iter().copied().fold(0.0, f64::max);
+        let prior: Vec<f64> = (1..=memory).map(|i| cost(day - Duration::days(i))).collect();
+        let prior_total = prior.iter().sum();
+        let largest = prior.iter().copied().fold(0.0, f64::max);
         return new_spend(day, actual, prior_total, rules)
             .or_else(|| sporadic_spike(day, actual, largest, rules));
     }
@@ -281,9 +285,9 @@ fn new_spend(day: NaiveDate, actual: f64, prior_total: f64, rules: &Rules) -> Op
     })
 }
 
-/// No usable baseline but some spend in the window: fires when the day
-/// clears the window's largest day by the absolute, relative and
-/// monthly-impact floors.
+/// No usable baseline but some recent spend: fires when the day clears the
+/// largest day of the last `max(lookback_days, MONTH_ECHO_REACH_DAYS)` days
+/// by the absolute, relative and monthly-impact floors.
 fn sporadic_spike(day: NaiveDate, actual: f64, largest: f64, rules: &Rules) -> Option<Finding> {
     let delta = actual - largest;
     let fires = largest > 0.0
@@ -576,6 +580,24 @@ mod tests {
             None,
             "delta 10 < 20"
         );
+    }
+
+    #[test]
+    fn spend_only_beyond_the_window_still_lets_a_spike_fire() {
+        // Aug 1 is 31 days before Sep 1: outside the 28-day window but inside
+        // new_spend's 35-day memory, so new_spend is blocked; the sporadic
+        // rule must look just as far back.
+        let mut s: BTreeMap<NaiveDate, f64> = [(d(2026, 8, 1), 30.0)].into();
+        s.insert(d(2026, 9, 1), 5000.0);
+        let f = evaluate_day(&s, d(2026, 9, 1), &Rules::default()).expect("fires");
+        assert_eq!(f.kind, AnomalyKind::Spike);
+        assert!((f.expected - 30.0).abs() < 1e-9);
+        assert!((f.delta - 4970.0).abs() < 1e-9);
+
+        s.insert(d(2026, 9, 1), 40.0);
+        assert_eq!(evaluate_day(&s, d(2026, 9, 1), &Rules::default()), None, "delta 10 < 20");
+        s.insert(d(2026, 9, 1), 30.0);
+        assert_eq!(evaluate_day(&s, d(2026, 9, 1), &Rules::default()), None, "same charge as last month");
     }
 
     #[test]
